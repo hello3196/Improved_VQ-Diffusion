@@ -13,6 +13,8 @@ import time
 import numpy as np
 from PIL import Image
 import os
+import pandas as pd 
+import wandb
 
 from torch.cuda.amp import autocast
 
@@ -60,6 +62,19 @@ class DALLE(nn.Module):
     @torch.no_grad()
     def prepare_condition(self, batch, condition=None):
         cond_key = self.condition_info['key']
+        cond = batch[cond_key] if condition is None else condition
+        if torch.is_tensor(cond):
+            cond = cond.to(self.device)
+        cond = self.condition_codec.get_tokens(cond)
+        cond_ = {}
+        for k, v in cond.items():
+            v = v.to(self.device) if torch.is_tensor(v) else v
+            cond_['condition_' + k] = v
+        return cond_
+
+    @torch.no_grad()
+    def prepare_condition2(self, batch, condition=None):
+        cond_key = 'text2'
         cond = batch[cond_key] if condition is None else condition
         if torch.is_tensor(cond):
             cond = cond.to(self.device)
@@ -121,12 +136,12 @@ class DALLE(nn.Module):
         elif sample_type[-1] == 'r':
             truncation_r = float(sample_type[:-1].replace('top', ''))
             def wrapper(*args, **kwards):
-                out = func(*args, **kwards)
+                out = func(*args, **kwards) # b x 4096 x 1024
                 # notice for different batches, out are same, we do it on out[0]
                 temp, indices = torch.sort(out, 1, descending=True) 
                 temp1 = torch.exp(temp)
                 temp2 = temp1.cumsum(dim=1)
-                temp3 = temp2 < truncation_r
+                temp3 = temp2 < truncation_r # accsum 0.85 이하는 다 사라짐
                 new_temp = torch.full_like(temp3[:,0:1,:], True)
                 temp6 = torch.cat((new_temp, temp3), dim=1)
                 temp3 = temp6[:,:-1,:]
@@ -151,13 +166,19 @@ class DALLE(nn.Module):
         replicate=1,
         return_att_weight=False,
         sample_type="top0.85r",
+        composition=False
     ):
+        # batch['text2'] 있으면 -> 
         self.eval()
         if condition is None:
             condition = self.prepare_condition(batch=batch)
         else:
             condition = self.prepare_condition(batch=None, condition=condition)
         
+        if composition != False: # If condition exist -> composition
+            condition2 = self.prepare_condition2(batch=batch)
+        
+
         batch_size = len(batch['text']) * replicate
 
         if self.learnable_cf:
@@ -172,27 +193,59 @@ class DALLE(nn.Module):
             if abs(self.guidance_scale - 1) < 1e-3:
                 return torch.cat((log_x_recon, self.transformer.zero_vector), dim=1)
             cf_log_x_recon = self.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
+
+            # print(f"[{t}]no condition: ", cf_log_x_recon)
+            # print(f"[{t}]condition: ", log_x_recon)            
             log_new_x_recon = cf_log_x_recon + self.guidance_scale * (log_x_recon - cf_log_x_recon)
             log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
             log_new_x_recon = log_new_x_recon.clamp(-70, 0)
             log_pred = torch.cat((log_new_x_recon, self.transformer.zero_vector), dim=1)
+
+            # c_mat = (log_x_recon - torch.logsumexp(log_x_recon, dim=1, keepdim=True)).clamp(-70, 0)
+            # n_mat = (cf_log_x_recon - torch.logsumexp(cf_log_x_recon, dim=1, keepdim=True)).clamp(-70, 0)
+
+            # c_mat = torch.stack(c_mat.max(dim=1), dim = 1)
+            # n_mat = torch.stack(n_mat.max(dim=1), dim = 1)
+            
+            # for n_m, c_m in zip(n_mat, c_mat):
+            #     wandb.log({
+            #         'logit_max log(no condition)' : pd.DataFrame(n_m.view(2*32, 32).to('cpu').numpy()),
+            #         'logit_max log(condition)' : pd.DataFrame(c_m.view(2*32, 32).to('cpu').numpy()) 
+            #     })
             return log_pred
 
         if replicate != 1:
             for k in condition.keys():
                 if condition[k] is not None:
                     condition[k] = torch.cat([condition[k] for _ in range(replicate)], dim=0)
+            if composition != False:
+                for k in condition2.keys():
+                    if condition2[k] is not None:
+                        condition2[k] = torch.cat([condition[k] for _ in range(replicate)], dim=0)
+                
             
         content_token = None
 
-        if len(sample_type.split(',')) > 1:
+        if len(sample_type.split(',')) > 1: # fast
             if sample_type.split(',')[1][:1]=='q':
                 self.transformer.p_sample = self.p_sample_with_truncation(self.transformer.p_sample, sample_type.split(',')[1])
         if sample_type.split(',')[0][:3] == "top" and self.truncation_forward == False:
             self.transformer.cf_predict_start = self.predict_start_with_truncation(cf_predict_start, sample_type.split(',')[0])
             self.truncation_forward = True
+        
+        if self.transformer.mask_schedule_test != 0:
+            trans_out = self.transformer.sample_mask_schedule(condition_token=condition['condition_token'],
+                                            condition_mask=condition.get('condition_mask', None),
+                                            condition_embed=condition.get('condition_embed_token', None),
+                                            content_token=content_token,
+                                            filter_ratio=filter_ratio,
+                                            temperature=temperature,
+                                            return_att_weight=return_att_weight,
+                                            return_logits=False,
+                                            print_log=False,
+                                            sample_type=sample_type)
 
-        if len(sample_type.split(',')) == 2 and sample_type.split(',')[1][:4]=='time' and int(float(sample_type.split(',')[1][4:])) >= 2:
+        elif len(sample_type.split(',')) == 2 and sample_type.split(',')[1][:4]=='time' and int(float(sample_type.split(',')[1][4:])) >= 2:
             trans_out = self.transformer.sample_fast(condition_token=condition['condition_token'],
                                                 condition_mask=condition.get('condition_mask', None),
                                                 condition_embed=condition.get('condition_embed_token', None),
@@ -204,6 +257,7 @@ class DALLE(nn.Module):
                                                 print_log=False,
                                                 sample_type=sample_type,
                                                 skip_step=int(float(sample_type.split(',')[1][4:])-1))
+
 
         else:
             if 'time' in sample_type and float(sample_type.split(',')[1][4:]) < 1:
@@ -224,10 +278,15 @@ class DALLE(nn.Module):
 
 
         content = self.content_codec.decode(trans_out['content_token'])  #(8,1024)->(8,3,256,256)
-        self.train()
         out = {
             'content': content
         }
+
+        # recon log
+        for i in range(16):
+            out[f"{i}_step_token"] = self.content_codec.decode(self.transformer.content_dict[f"{i}_step_token"])
+        self.train()
+        
         
 
         return out

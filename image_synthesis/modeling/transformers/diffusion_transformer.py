@@ -20,6 +20,13 @@ from torch.cuda.amp import autocast
 from image_synthesis.modeling.transformers.transformer_utils import Text2ImageTransformer
 eps = 1e-8
 
+# visualization tool
+import seaborn as sns
+import pandas as pd
+import matplotlib.pyplot as plt
+import wandb
+import random
+
 def sum_except_batch(x, num_dims=1):
     return x.reshape(*x.shape[:num_dims], -1).sum(-1)
 
@@ -64,6 +71,24 @@ def alpha_schedule(time_step, N=100, att_1 = 0.99999, att_T = 0.000009, ctt_1 = 
     ctt = np.concatenate((ctt[1:], [0]))
     btt = (1-att-ctt)/N
     return at, bt, ct, att, btt, ctt
+
+def snail(n):
+    _list = []
+    row = 0 
+    col = -1 
+    trans = 1 
+    while n > 0: 
+        for i in range(n): 
+            col += trans
+            _list.append([row, col])
+        n -= 1 
+        for j in range(n): 
+            row += trans
+            _list.append([row, col])
+        trans *= -1 
+
+    answer = list(map(lambda x: x[1] + 32*x[0], _list))
+    return answer
 
 class DiffusionTransformer(nn.Module):
     def __init__(
@@ -155,7 +180,7 @@ class DiffusionTransformer(nn.Module):
         self.update_n_sample()
         
         self.learnable_cf = learnable_cf
-    
+        self.content_dict = {}
 
     def update_n_sample(self):
         if self.num_timesteps == 100:
@@ -169,6 +194,39 @@ class DiffusionTransformer(nn.Module):
             self.n_sample = [21] + [41] * 23 + [60]
         elif self.num_timesteps == 10:
             self.n_sample = [69] + [102] * 8 + [139]
+
+    def mask_schedule(self, n):
+        index_list = []
+        if n == 1: # out -> in
+            index_list = np.array(snail(32)).reshape(16, 64)
+
+        elif n == 2: # in -> out
+            index_list = np.array(snail(32)[::-1]).reshape(16, 64)
+
+        elif n == 3: # blockwise grid
+            for i in range(4):
+                for j in range(4):
+                    start = 32*8*i + 8*j
+                    temp_list = np.array([start + n for n in range(8)] * 8)
+                    temp_list += np.array([32*n for n in range(8) for _ in range(8)])
+                    index_list.append(temp_list)
+            index_list = np.array(index_list)
+            
+        elif n == 4: # uniform grid
+            for i in range(4):
+                for j in range(4):
+                    temp_list = np.array([j+4*n for n in range(8)] * 8)
+                    temp_list += np.array([32*4*n for n in range(8) for _ in range(8)])
+                    temp_list += 32*i
+                    index_list.append(temp_list)
+            index_list = np.array(index_list)
+
+        elif n ==5: # random
+            index_list = [i for i in range(1024)]
+            random.shuffle(index_list)
+            index_list = np.array(index_list).reshape(16, 64)
+
+        return torch.tensor(index_list)
 
     def multinomial_kl(self, log_prob1, log_prob2):   # compute KL loss on log_prob
         kl = (log_prob1.exp() * (log_prob1 - log_prob2)).sum(dim=1)
@@ -278,11 +336,43 @@ class DiffusionTransformer(nn.Module):
         return log_model_pred, log_x_recon
 
     @torch.no_grad()
-    def p_sample(self, log_x, cond_emb, t, sampled=None, to_sample=None):               # sample q(xt-1) for next step from  xt, actually is p(xt-1|xt)
+    def p_sample(self, log_x, cond_emb, t, sampled=None, to_sample=None, mask_schedule_index=None):               # sample q(xt-1) for next step from  xt, actually is p(xt-1|xt)
         model_log_prob, log_x_recon = self.p_pred(log_x, cond_emb, t)
 
         max_sample_per_step = self.prior_ps  # max number to sample per step
-        if t[0] > 0 and self.prior_rule > 0 and to_sample is not None: # prior_rule: 0 for VQ-Diffusion v1, 1 for only high-quality inference, 2 for purity prior
+        if self.mask_schedule_test != 0 and t[0] > 0 and to_sample is not None: # mask_schedule_test
+            """
+            T = 16 fix
+            schedule = 1 ~ 4
+            1) out -> in
+            2) in -> out
+            3) grid: blockwise
+            4) grid: uniform
+
+            self.sel_list = self.mask_schedule(self.mask_schedule_test)
+            """ 
+            log_x_idx = log_onehot_to_index(log_x)
+            out = self.log_sample_categorical(log_x_recon) # now recon
+            out_idx = log_onehot_to_index(out)
+
+            out2_idx = log_x_idx.clone() # previous
+
+            for i in range(log_x.shape[0]): # per batch
+                n_sample = min(to_sample - sampled[i], max_sample_per_step)
+                if to_sample - sampled[i] - n_sample == 1:
+                    n_sample = to_sample - sampled[i]
+                if n_sample <= 0:
+                    continue
+                sel = self.sel_list[mask_schedule_index] # importance sample with purity
+                out2_idx[i][sel] = out_idx[i][sel]
+                sampled[i] += ((out2_idx[i] != self.num_classes - 1).sum() - (log_x_idx[i] != self.num_classes - 1).sum()).item()
+
+            # recon log
+            temp_token = log_onehot_to_index(log_x_recon)
+            self.content_dict[f"{mask_schedule_index}_step_token"] = temp_token
+            out = index_to_log_onehot(out2_idx, self.num_classes)
+
+        elif t[0] > 0 and self.prior_rule > 0 and self.prior_rule < 3 and to_sample is not None: # prior_rule: 0 for VQ-Diffusion v1, 1 for only high-quality inference, 2 for purity prior
             log_x_idx = log_onehot_to_index(log_x)
 
             if self.prior_rule == 1:
@@ -290,7 +380,7 @@ class DiffusionTransformer(nn.Module):
             elif self.prior_rule == 2:
                 score = torch.exp(log_x_recon).max(dim=1).values.clamp(0, 1)
                 score /= (score.max(dim=1, keepdim=True).values + 1e-10)
-
+                          
             if self.prior_rule != 1 and self.prior_weight > 0:
                 # probability adjust parameter, prior_weight: 'r' in Equation.11 of Improved VQ-Diffusion
                 prob = ((1 + score * self.prior_weight).unsqueeze(1) * log_x_recon).softmax(dim=1)
@@ -307,20 +397,96 @@ class DiffusionTransformer(nn.Module):
                 _score += 1
             _score[log_x_idx != self.num_classes - 1] = 0
 
+            for i in range(log_x.shape[0]): # per batch
+                n_sample = min(to_sample - sampled[i], max_sample_per_step)
+                if to_sample - sampled[i] - n_sample == 1:
+                    n_sample = to_sample - sampled[i]
+                if n_sample <= 0:
+                    continue
+                sel = torch.multinomial(_score[i], n_sample) # importance sample with purity
+                # score_matrix = _score[i].view(32, 32)
+                # color_matrix = _score[i]
+                # for idx in sel: # 이번에 selected -> 1 (block color)
+                #     color_matrix[idx] = 1
+                # color_matrix = color_matrix.view(32, 32)
+                # an = pd.DataFrame(score_matrix.to('cpu').numpy())
+                # df = pd.DataFrame(color_matrix.to('cpu').numpy()).replace(0, -1)
+
+                # fig, ax = plt.subplots(figsize = (20, 20))
+                # sns.heatmap(df, annot=an, cbar=False, fmt = '.2f', vmin = -1, vmax = 1, cmap = "Greys")
+                # wandb.log({f"{i}_logit": wandb.Image(fig)})
+                out2_idx[i][sel] = out_idx[i][sel]
+                sampled[i] += ((out2_idx[i] != self.num_classes - 1).sum() - (log_x_idx[i] != self.num_classes - 1).sum()).item()
+
+            out = index_to_log_onehot(out2_idx, self.num_classes)
+
+        elif t[0] > 0 and self.prior_rule == 3 and to_sample is not None: # MaskGIT schedule
+            log_x_idx = log_onehot_to_index(log_x) # b x 1024
+            # 1) sampling all location, corresponding logit
+            logit_value, out = self.log_sample_categorical_prob(log_x_recon) # 4 x 1024, 4 x 4096 x 1024
+            out_idx = log_onehot_to_index(out) # b x 1024
+            out2_idx = log_x_idx.clone()
+            logit_value[log_x_idx != self.num_classes - 1] = 0
+
             for i in range(log_x.shape[0]):
                 n_sample = min(to_sample - sampled[i], max_sample_per_step)
                 if to_sample - sampled[i] - n_sample == 1:
                     n_sample = to_sample - sampled[i]
                 if n_sample <= 0:
                     continue
-                sel = torch.multinomial(_score[i], n_sample)
+                _, sel = torch.topk(logit_value[i], n_sample) # corresponding logit rank
+                # print(out2_idx.shape)
+                # print(out_idx.shape)
+                out2_idx[i][sel] = out_idx[i][sel]
+                sampled[i] += ((out2_idx[i] != self.num_classes - 1).sum() - (log_x_idx[i] != self.num_classes - 1).sum()).item()
+        
+            out = index_to_log_onehot(out2_idx, self.num_classes)
+        
+        elif t[0] > 0 and self.prior_rule == 4 and to_sample is not None: # Random + purity temperature
+            log_x_idx = log_onehot_to_index(log_x)
+
+            score = torch.exp(log_x_recon).max(dim=1).values.clamp(0, 1) # 4 x 1024
+            score /= (score.max(dim=1, keepdim=True).values + 1e-10)
+            score += self.purity_temp
+
+            out = self.log_sample_categorical(log_x_recon)
+            out_idx = log_onehot_to_index(out)
+
+            out2_idx = log_x_idx.clone()
+            if score.sum() < 1e-6:
+                _score += 1
+            score[log_x_idx != self.num_classes - 1] = 0
+
+            for i in range(log_x.shape[0]): # per batch
+                n_sample = min(to_sample - sampled[i], max_sample_per_step)
+                if to_sample - sampled[i] - n_sample == 1:
+                    n_sample = to_sample - sampled[i]
+                if n_sample <= 0:
+                    continue
+                sel = torch.multinomial(score[i], n_sample) # importance sample with purity
+                # score_matrix = _score[i].view(32, 32)
+                # color_matrix = _score[i]
+                # for idx in sel: # 이번에 selected -> 1 (block color)
+                #     color_matrix[idx] = 1
+                # color_matrix = color_matrix.view(32, 32)
+                # an = pd.DataFrame(score_matrix.to('cpu').numpy())
+                # df = pd.DataFrame(color_matrix.to('cpu').numpy()).replace(0, -1)
+
+                # fig, ax = plt.subplots(figsize = (20, 20))
+                # sns.heatmap(df, annot=an, cbar=False, fmt = '.2f', vmin = -1, vmax = 1, cmap = "Greys")
+                # wandb.log({f"{i}_logit": wandb.Image(fig)})
                 out2_idx[i][sel] = out_idx[i][sel]
                 sampled[i] += ((out2_idx[i] != self.num_classes - 1).sum() - (log_x_idx[i] != self.num_classes - 1).sum()).item()
 
             out = index_to_log_onehot(out2_idx, self.num_classes)
+
+
         else:
             # Gumbel sample
             out = self.log_sample_categorical(model_log_prob)
+            # print(f"model_log_prob_max: {model_log_prob[0].max(dim=0)[0].view(32, 32)}")
+            # print(f"model_log_prob_mean: {model_log_prob[0].mean(dim=0).view(32, 32)}")
+            # print(f"model_log_prob_min: {model_log_prob[0].min(dim=0)[0].view(32, 32)}")
             sampled = [1024] * log_x.shape[0]
 
         if to_sample is not None:
@@ -334,6 +500,15 @@ class DiffusionTransformer(nn.Module):
         sample = (gumbel_noise + logits).argmax(dim=1)
         log_sample = index_to_log_onehot(sample, self.num_classes)
         return log_sample
+
+    def log_sample_categorical_prob(self, logits):           # use gumbel to sample onehot vector from log probability with corresponding probability
+        uniform = torch.rand_like(logits)
+        logits_reg = logits.softmax(dim=1)
+        gumbel_noise = -torch.log(-torch.log(uniform + 1e-30) + 1e-30)
+        sample = (gumbel_noise + logits).argmax(dim=1) # b x 1 x 1024
+        value = torch.gather(logits_reg, 1, sample.unsqueeze(1)).squeeze() # b x 1 x 1024 -> (Squeeze) b x 1024
+        log_sample = index_to_log_onehot(sample, self.num_classes)
+        return value, log_sample
 
     def q_sample(self, log_x_start, t):                 # diffusion step, q(xt|x0) and sample xt
         log_EV_qxt_x0 = self.q_pred(log_x_start, t)
@@ -591,11 +766,31 @@ class DiffusionTransformer(nn.Module):
             log_z = torch.log(mask_logits)
             start_step = self.num_timesteps
             with torch.no_grad():
+
+                # fast purity x10
+                # self.n_sample = [21] + [41] * 23 + [60]
+                # diffusion_list = [index for index in range(100 -1, -1, -4)]
+                # for i, diffusion_index in enumerate(diffusion_list):
+
                 for diffusion_index in range(start_step-1, -1, -1):
                     t = torch.full((batch_size,), diffusion_index, device=device, dtype=torch.long)
                     sampled = [0] * log_z.shape[0]
-                    while min(sampled) < self.n_sample[diffusion_index]:
+                    while min(sampled) < self.n_sample[diffusion_index]: # 원래는 i = diffusion_index
                         log_z, sampled = self.p_sample(log_z, cond_emb, t, sampled, self.n_sample[diffusion_index])     # log_z is log_onehot
+                        # print("Sample & step == 0")
+                        # print(f"diffusion_index: {diffusion_index}")
+                        # print(f"log_z shape: {log_z.shape}")
+                        # log_z_index = log_onehot_to_index(log_z)
+                        # for i in range(batch_size):
+                            # log_z_2d = log_z_index[i].view(32, 32)
+                            # df = pd.DataFrame(log_z_2d.to('cpu').numpy())
+                            # an = df.replace(self.num_classes - 1, 'mask').astype('str')
+                            # df = df.replace(self.num_classes - 1, -(self.num_classes - 1)) # for cmap
+                            # fig, ax = plt.subplots(figsize = (20, 20))
+                            # sns.heatmap(df, annot=an, cbar=False, fmt = '')
+                            # wandb.log({f"{i}_content": wandb.Image(fig)})
+                            # print(f"{i}_batch mask num: {(log_z_index[i] == self.num_classes - 1).sum()}")
+                            # print(f"sampled: {sampled[i]}")
 
         else:
             t = torch.full((batch_size,), start_step-1, device=device, dtype=torch.long)
@@ -606,6 +801,19 @@ class DiffusionTransformer(nn.Module):
                 for diffusion_index in range(start_step-1, -1, -1):
                     t = torch.full((batch_size,), diffusion_index, device=device, dtype=torch.long)
                     log_z = self.p_sample(log_z, cond_emb, t)     # log_z is log_onehot
+                    # print("Sample")
+                    # print(f"diffusion_index: {diffusion_index}")
+                    # print(f"log_z shape: {log_z.shape}")
+                    # log_z_index = log_onehot_to_index(log_z)
+                    # for i in range(batch_size):
+                        # print(f"{i}_batch mask num: {(log_z_index[i] == self.num_classes - 1).sum()}")
+                        # log_z_2d = log_z_index[i].view(32, 32)
+                        # df = pd.DataFrame(log_z_2d.to('cpu').numpy())
+                        # an = df.replace(self.num_classes - 1, 'mask').astype('str')
+                        # df = df.replace(self.num_classes - 1, -(self.num_classes - 1)) # for cmap
+                        # fig, ax = plt.subplots(figsize = (20, 20))
+                        # sns.heatmap(df, annot=an, cbar=False, fmt = '')
+                        # wandb.log({f"{i}_content": wandb.Image(fig)})
         
 
         content_token = log_onehot_to_index(log_z)
@@ -614,7 +822,6 @@ class DiffusionTransformer(nn.Module):
         if return_logits:
             output['logits'] = torch.exp(log_z)
         return output
-
 
 
     def sample_fast(
@@ -641,6 +848,7 @@ class DiffusionTransformer(nn.Module):
         batch_size = input['condition_token'].shape[0]
         device = self.log_at.device
         start_step = int(self.num_timesteps * filter_ratio)
+        output = {}
 
         # get cont_emb and cond_emb
         if content_token != None:
@@ -665,7 +873,7 @@ class DiffusionTransformer(nn.Module):
             if diffusion_list[-1] != 0:
                 diffusion_list.append(0)
             # for diffusion_index in range(start_step-1, -1, -1):
-            for diffusion_index in diffusion_list:
+            for n, diffusion_index in enumerate(diffusion_list):
                 
                 t = torch.full((batch_size,), diffusion_index, device=device, dtype=torch.long)
                 log_x_recon = self.cf_predict_start(log_z, cond_emb, t)
@@ -675,6 +883,186 @@ class DiffusionTransformer(nn.Module):
                     model_log_prob = self.q_posterior(log_x_start=log_x_recon, log_x_t=log_z, t=t)
 
                 log_z = self.log_sample_categorical(model_log_prob)
+                temp_token = log_onehot_to_index(log_x_recon)
+                output[f"{n}_step_token"] = temp_token
+                # print("Sample_fast")
+                # print(f"diffusion_index: {diffusion_index}")
+                # print(f"log_z shape: {log_z.shape}")
+                # log_z_index = log_onehot_to_index(log_z)
+                # for i in range(batch_size):
+                    # print(f"{i}_batch mask num: {(log_z_index[i] == self.num_classes - 1).sum()}")
+                    # log_z_2d = log_z_index[i].view(32, 32)
+                    # df = pd.DataFrame(log_z_2d.to('cpu').numpy())
+                    # an = df.replace(self.num_classes - 1, 'mask').astype('str')
+                    # df = df.replace(self.num_classes - 1, -(self.num_classes - 1)) # for cmap
+                    # fig, ax = plt.subplots(figsize = (20, 20))
+                    # sns.heatmap(df, annot=an, cbar=False, fmt = '')
+                    # wandb.log({f"{i}_content": wandb.Image(fig)})
+
+        content_token = log_onehot_to_index(log_z)
+        
+        output['content_token'] = content_token
+        if return_logits:
+            output['logits'] = torch.exp(log_z)
+        return output
+
+    def sample_mask_schedule(
+            self,
+            condition_token,
+            condition_mask,
+            condition_embed,
+            content_token = None,
+            filter_ratio = 0.5,
+            temperature = 1.0,
+            return_att_weight = False,
+            return_logits = False,
+            content_logits = None,
+            print_log = True,
+            **kwargs):
+        input = {'condition_token': condition_token,
+                'content_token': content_token, 
+                'condition_mask': condition_mask,
+                'condition_embed_token': condition_embed,
+                'content_logits': content_logits,
+                }
+
+        if input['condition_token'] != None:
+            batch_size = input['condition_token'].shape[0]
+        else:
+            batch_size = kwargs['batch_size']
+    
+        device = self.log_at.device
+        start_step = int(self.num_timesteps * filter_ratio)
+
+        # get cont_emb and cond_emb
+        if content_token != None:
+            sample_image = input['content_token'].type_as(input['content_token'])
+
+        if self.condition_emb is not None:  # do this
+            with torch.no_grad():
+                cond_emb = self.condition_emb(input['condition_token']) # B x Ld x D   #256*1024
+            cond_emb = cond_emb.float()
+        else: # share condition embeding with content
+            if input.get('condition_embed_token', None) != None:
+                cond_emb = input['condition_embed_token'].float()
+            else:
+                cond_emb = None
+        self.sel_list = self.mask_schedule(self.mask_schedule_test)
+        
+        if start_step == 0:
+            # use full mask sample
+            zero_logits = torch.zeros((batch_size, self.num_classes-1, self.shape),device=device)
+            one_logits = torch.ones((batch_size, 1, self.shape),device=device)
+            mask_logits = torch.cat((zero_logits, one_logits), dim=1)
+            log_z = torch.log(mask_logits)
+            start_step = self.num_timesteps
+            with torch.no_grad():
+                # step = 16 fixed
+                self.n_sample = [64] * 16
+                diffusion_list = [index for index in range(100 -5, -1, -6)]
+                for i, diffusion_index in enumerate(diffusion_list):
+                    t = torch.full((batch_size,), diffusion_index, device=device, dtype=torch.long)
+                    sampled = [0] * log_z.shape[0]
+                    while min(sampled) < self.n_sample[i]: 
+                        log_z, sampled = self.p_sample(log_z, cond_emb, t, sampled, self.n_sample[i], mask_schedule_index = i)     
+                        # token log step by step
+                        log_z_index = log_onehot_to_index(log_z)
+                        for i in range(batch_size):
+                            log_z_2d = log_z_index[i].view(32, 32)
+                            df = pd.DataFrame(log_z_2d.to('cpu').numpy())
+                            an = df.replace(self.num_classes - 1, 'mask').astype('str')
+                            df = df.replace(self.num_classes - 1, -(self.num_classes - 1)) # for cmap
+                            fig, ax = plt.subplots(figsize = (20, 20))
+                            sns.heatmap(df, annot=an, cbar=False, fmt = '', vmin = -4096, vmax = 4096)
+                            wandb.log({f"{i}_content": wandb.Image(fig)})
+                            print(f"{i}_batch mask num: {(log_z_index[i] == self.num_classes - 1).sum()}")
+                            print(f"sampled: {sampled[i]}")
+                            
+        content_token = log_onehot_to_index(log_z)
+        
+        output = {'content_token': content_token}
+        if return_logits:
+            output['logits'] = torch.exp(log_z)
+        return output
+
+
+# compositional -> X 폐기
+    def sample_fast_comp(
+            self,
+            condition_token1,
+            condition_token2,
+            condition_mask,
+            condition_embed1,
+            condition_embed2,
+            content_token = None,
+            filter_ratio = 0.5,
+            temperature = 1.0,
+            return_att_weight = False,
+            return_logits = False,
+            content_logits = None,
+            print_log = True,
+            skip_step = 1,
+            **kwargs):
+        input = {'condition_token1': condition_token1,
+                'condition_token2': condition_token2,
+                'content_token': content_token, 
+                'condition_mask': condition_mask,
+                'condition_embed_token1': condition_embed1,
+                'condition_embed_token2': condition_embed2,
+                'content_logits': content_logits,
+                }
+
+        batch_size = input['condition_token1'].shape[0]
+        device = self.log_at.device
+        start_step = int(self.num_timesteps * filter_ratio)
+
+        # get cont_emb and cond_emb
+        if content_token != None:
+            sample_image = input['content_token1'].type_as(input['content_token1'])
+        ## 여기서부터
+        if self.condition_emb is not None:
+            with torch.no_grad():
+                cond_emb1 = self.condition_emb(input['condition_token1']) # B x Ld x D   #256*1024
+            cond_emb1 = cond_emb1.float()
+        else: # share condition embeding with content
+            cond_emb1 = input['condition_embed_token1'].float()
+
+        assert start_step == 0
+        zero_logits = torch.zeros((batch_size, self.num_classes-1, self.shape),device=device)
+        one_logits = torch.ones((batch_size, 1, self.shape),device=device)
+        mask_logits = torch.cat((zero_logits, one_logits), dim=1)
+        log_z = torch.log(mask_logits)
+        start_step = self.num_timesteps
+        with torch.no_grad():
+            # skip_step = 1
+            diffusion_list = [index for index in range(start_step-1, -1, -1-skip_step)]
+            if diffusion_list[-1] != 0:
+                diffusion_list.append(0)
+            # for diffusion_index in range(start_step-1, -1, -1):
+            for n, diffusion_index in enumerate(diffusion_list):
+                
+                t = torch.full((batch_size,), diffusion_index, device=device, dtype=torch.long)
+                log_x_recon = self.cf_predict_start(log_z, cond_emb, t)
+                if diffusion_index > skip_step:
+                    model_log_prob = self.q_posterior(log_x_start=log_x_recon, log_x_t=log_z, t=t-skip_step)
+                else:
+                    model_log_prob = self.q_posterior(log_x_start=log_x_recon, log_x_t=log_z, t=t)
+
+                log_z = self.log_sample_categorical(model_log_prob)
+                log_z_index = log_onehot_to_index(log_z)
+
+                # # log for recon
+                # temp_token = log_onehot_to_index(log_x_recon)
+                # output[f"{n}_step_token"] = temp_token
+                # for i in range(batch_size):
+                    # print(f"{i}_batch mask num: {(log_z_index[i] == self.num_classes - 1).sum()}")
+                    # log_z_2d = log_z_index[i].view(32, 32)
+                    # df = pd.DataFrame(log_z_2d.to('cpu').numpy())
+                    # an = df.replace(self.num_classes - 1, 'mask').astype('str')
+                    # df = df.replace(self.num_classes - 1, -(self.num_classes - 1)) # for cmap
+                    # fig, ax = plt.subplots(figsize = (20, 20))
+                    # sns.heatmap(df, annot=an, cbar=False, fmt = '')
+                    # wandb.log({f"{i}_content": wandb.Image(fig)})
 
         content_token = log_onehot_to_index(log_z)
         
