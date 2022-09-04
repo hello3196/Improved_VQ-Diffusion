@@ -10,7 +10,7 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
 
 import torch
-import cv2
+# import cv2
 import argparse
 import numpy as np
 import torchvision
@@ -19,6 +19,8 @@ from PIL import Image
 from image_synthesis.utils.io import load_yaml_config
 from image_synthesis.modeling.build import build_model
 from image_synthesis.utils.misc import get_model_parameters_info
+import image_synthesis.modeling.modules.clip.clip as clip
+from image_synthesis.data.mscoco_dataset import CocoDataset 
 
 import wandb
 class VQ_Diffusion():
@@ -157,6 +159,94 @@ class VQ_Diffusion():
         #     for b in range(content.shape[0]):
         #         im = Image.fromarray(content[b])
         #         wandb.log({f"{i}_step recon" : wandb.Image(im)})
+
+    def inference_generate_sample_for_metric(self, truncation_rate, batch_size, infer_speed=False, guidance_scale=1.0, prior_rule=0, prior_weight=0, learnable_cf=True, text2=False, purity_temp=1., schedule=0):
+        """
+        T = 16 fix
+        schedule = 1 ~ 4
+        1) out -> in
+        2) in -> out
+        3) grid: blockwise
+        4) grid: uniform
+
+        5) random (fast)
+        """
+
+        self.model.guidance_scale = guidance_scale
+        self.model.learnable_cf = self.model.transformer.learnable_cf = learnable_cf # whether to use learnable classifier-free
+        self.model.transformer.prior_rule = prior_rule      # inference rule: 0 for VQ-Diffusion v1, 1 for only high-quality inference, 2 for purity prior
+        self.model.transformer.prior_weight = prior_weight  # probability adjust parameter, 'r' in Equation.11 of Improved VQ-Diffusion
+        self.model.transformer.purity_temp = purity_temp
+        self.model.transformer.mask_schedule_test = schedule
+
+        if infer_speed != False:
+            add_string = 'r,time'+str(infer_speed)
+        else:
+            add_string = 'r'
+
+        self.model.eval()
+        cf_cond_emb = self.model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
+
+        def cf_predict_start(log_x_t, cond_emb, t):
+            log_x_recon = self.model.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
+            if abs(self.model.guidance_scale - 1) < 1e-3:
+                return torch.cat((log_x_recon, self.model.transformer.zero_vector), dim=1)
+            cf_log_x_recon = self.model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
+
+            # print(f"[{t}]no condition: ", cf_log_x_recon)
+            # print(f"[{t}]condition: ", log_x_recon)            
+            log_new_x_recon = cf_log_x_recon + self.model.guidance_scale * (log_x_recon - cf_log_x_recon)
+            log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
+            log_new_x_recon = log_new_x_recon.clamp(-70, 0)
+            log_pred = torch.cat((log_new_x_recon, self.model.transformer.zero_vector), dim=1)
+
+            # c_mat = (log_x_recon - torch.logsumexp(log_x_recon, dim=1, keepdim=True)).clamp(-70, 0)
+            # n_mat = (cf_log_x_recon - torch.logsumexp(cf_log_x_recon, dim=1, keepdim=True)).clamp(-70, 0)
+
+            # c_mat = torch.stack(c_mat.max(dim=1), dim = 1)
+            # n_mat = torch.stack(n_mat.max(dim=1), dim = 1)
+            
+            # for n_m, c_m in zip(n_mat, c_mat):
+            #     wandb.log({
+            #         'logit_max log(no condition)' : pd.DataFrame(n_m.view(2*32, 32).to('cpu').numpy()),
+            #         'logit_max log(condition)' : pd.DataFrame(c_m.view(2*32, 32).to('cpu').numpy()) 
+            #     })
+            return log_pred
+
+        sample_type = "top"+str(truncation_rate)+add_string
+
+        if len(sample_type.split(',')) > 1: # fast
+            if sample_type.split(',')[1][:1]=='q':
+                self.model.transformer.p_sample = self.model.p_sample_with_truncation(self.model.transformer.p_sample, sample_type.split(',')[1])
+        if sample_type.split(',')[0][:3] == "top" and self.model.truncation_forward == False:
+            self.model.transformer.cf_predict_start = self.model.predict_start_with_truncation(cf_predict_start, sample_type.split(',')[0])
+            self.model.truncation_forward = True
+                
+        CLIP, _ = clip.load("ViT-B/32", device)
+        data = CocoDataset(data_root="/st1/dataset/coco_vq", phase='train')
+        with torch.no_grad():
+            cos_sim = []
+            for data_i in torch.utils.data.DataLoader(dataset=data, batch_size=batch_size):
+                out = self.model.generate_content_for_metric(
+                    batch=data_i,
+                    filter_ratio=0,
+                    sample_type=sample_type
+                ) # B x C x H x W
+
+                print(out[0])
+                # img로 scaling
+
+                img_fts = CLIP.encode_image(out)
+                img_fts = F.normalize(img_fts)
+                txt_fts = CLIP.encode_text(texts)
+                txt_fts = F.normalize(txt_fts)
+                sim = F.cosine_similarity(img_fts, txt_fts, dim=-1)
+                print("sim", sim)
+                cos_sim.append(sim)
+            cos_sim = torch.stack(cos_sim, dim=1)
+            clip_score = torch.mean(cos_sim)
+            print("final", clip_score)
+
                 
     def mask_schedule_test(self, text, truncation_rate, save_root, batch_size, infer_speed=False, guidance_scale=1.0, prior_rule=0, prior_weight=0, learnable_cf=True, text2=False, purity_temp=1., schedule=0):
         """
@@ -236,8 +326,11 @@ if __name__ == '__main__':
     # VQ_Diffusion_model.inference_generate_sample_with_condition("a long exposure photo of waterfall", truncation_rate=1.0, save_root="RESULT", batch_size=4, guidance_scale=5.0, learnable_cf=False)
 
     # Inference Improved VQ-Diffusion with learnable classifier-free sampling
-    VQ_Diffusion_model.inference_generate_sample_with_condition("teddy bear playing in the pool", truncation_rate=1.0, save_root="RESULT", batch_size=4, guidance_scale=5.0)
+    # VQ_Diffusion_model.inference_generate_sample_with_condition("teddy bear playing in the pool", truncation_rate=1.0, save_root="RESULT", batch_size=4, guidance_scale=5.0)
     # VQ_Diffusion_model.inference_generate_sample_with_condition("a long exposure photo of waterfall", truncation_rate=1.0, save_root="RESULT", batch_size=4, guidance_scale=5.0)
+
+    # Inference Improved VQ-Diffusion for metric
+    VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=1)
 
     # Inference Improved VQ-Diffusion with fast/high-quality inference
     # VQ_Diffusion_model.inference_generate_sample_with_condition("a long exposure photo of waterfall", truncation_rate=0.86, save_root="RESULT", batch_size=4, infer_speed=0.5) # high-quality inference, 0.5x inference speed

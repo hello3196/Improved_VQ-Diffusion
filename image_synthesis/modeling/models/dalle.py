@@ -291,6 +291,78 @@ class DALLE(nn.Module):
 
         return out
 
+    def generate_content_for_metric(
+        self,
+        *,
+        batch,
+        condition=None,
+        filter_ratio = 0.5,
+        temperature = 1.0,
+        content_ratio = 0.0,
+        replicate=1,
+        return_att_weight=False,
+        sample_type="top0.85r",
+        composition=False
+    ):  
+
+        content_token = None
+
+        if condition is None:
+            condition = self.prepare_condition(batch=batch)
+        else:
+            for i in range(batch['text'].shape[0]):
+                condition = self.prepare_condition(batch=None, condition=condition)
+            condition = self.prepare_condition(batch=None, condition=condition)
+        
+        if composition != False: # If condition exist -> composition
+            condition2 = self.prepare_condition2(batch=batch)
+
+        if self.transformer.mask_schedule_test != 0:
+            trans_out = self.transformer.sample_mask_schedule(condition_token=condition['condition_token'],
+                                            condition_mask=condition.get('condition_mask', None),
+                                            condition_embed=condition.get('condition_embed_token', None),
+                                            content_token=content_token,
+                                            filter_ratio=filter_ratio,
+                                            temperature=temperature,
+                                            return_att_weight=return_att_weight,
+                                            return_logits=False,
+                                            print_log=False,
+                                            sample_type=sample_type)
+
+        elif len(sample_type.split(',')) == 2 and sample_type.split(',')[1][:4]=='time' and int(float(sample_type.split(',')[1][4:])) >= 2:
+            trans_out = self.transformer.sample_fast(condition_token=condition['condition_token'],
+                                                condition_mask=condition.get('condition_mask', None),
+                                                condition_embed=condition.get('condition_embed_token', None),
+                                                content_token=content_token,
+                                                filter_ratio=filter_ratio,
+                                                temperature=temperature,
+                                                return_att_weight=return_att_weight,
+                                                return_logits=False,
+                                                print_log=False,
+                                                sample_type=sample_type,
+                                                skip_step=int(float(sample_type.split(',')[1][4:])-1))
+        else:
+            if 'time' in sample_type and float(sample_type.split(',')[1][4:]) < 1:
+                self.transformer.prior_ps = int(1024 // self.transformer.num_timesteps * float(sample_type.split(',')[1][4:]))
+                if self.transformer.prior_rule == 0:
+                    self.transformer.prior_rule = 1
+                self.transformer.update_n_sample()
+            trans_out = self.transformer.sample(condition_token=condition['condition_token'],
+                                            condition_mask=condition.get('condition_mask', None),
+                                            condition_embed=condition.get('condition_embed_token', None),
+                                            content_token=content_token,
+                                            filter_ratio=filter_ratio,
+                                            temperature=temperature,
+                                            return_att_weight=return_att_weight,
+                                            return_logits=False,
+                                            print_log=False,
+                                            sample_type=sample_type)
+
+        content = self.content_codec.decode(trans_out['content_token'])  #(8,1024)->(8,3,256,256)
+        
+        return content
+
+
     @torch.no_grad()
     def reconstruct(
         self,
