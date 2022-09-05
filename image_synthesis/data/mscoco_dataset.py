@@ -36,13 +36,14 @@ class CocoDataset(Dataset):
     def __getitem__(self, index):
         this_item = self.json_file['annotations'][index]
         caption = this_item['caption'].lower()
-        image_name = str(this_item['image_id']).zfill(12)
-        image_path = os.path.join(self.folder_path, self.image_prename+image_name+'.jpg')
-        image = load_img(image_path)
-        image = np.array(image).astype(np.uint8)
-        image = self.transform(image = image)['image']
+        # image_name = str(this_item['image_id']).zfill(12)
+        # image_path = os.path.join(self.folder_path, self.image_prename+image_name+'.jpg')
+        # image = load_img(image_path)
+        # image = np.array(image).astype(np.uint8)
+        # image = self.transform(image = image)['image']
         data = {
-                'image': np.transpose(image.astype(np.float32), (2, 0, 1)),
+                # 'image': np.transpose(image.astype(np.float32), (2, 0, 1)),
+                # 'image': None,
                 'text': caption if (self.phase != 'train' or self.drop_rate < 1e-6 or random.random() >= self.drop_rate) else '',
         }
         

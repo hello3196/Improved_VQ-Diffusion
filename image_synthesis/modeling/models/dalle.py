@@ -283,8 +283,8 @@ class DALLE(nn.Module):
         }
 
         # recon log
-        for i in range(16):
-            out[f"{i}_step_token"] = self.content_codec.decode(self.transformer.content_dict[f"{i}_step_token"])
+        # for i in range(16):
+        #     out[f"{i}_step_token"] = self.content_codec.decode(self.transformer.content_dict[f"{i}_step_token"])
         self.train()
         
         

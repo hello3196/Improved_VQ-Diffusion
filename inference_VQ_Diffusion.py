@@ -10,6 +10,7 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
 
 import torch
+import torch.nn.functional as F
 # import cv2
 import argparse
 import numpy as np
@@ -221,12 +222,17 @@ class VQ_Diffusion():
         if sample_type.split(',')[0][:3] == "top" and self.model.truncation_forward == False:
             self.model.transformer.cf_predict_start = self.model.predict_start_with_truncation(cf_predict_start, sample_type.split(',')[0])
             self.model.truncation_forward = True
-                
-        CLIP, _ = clip.load("ViT-B/32", device)
-        data = CocoDataset(data_root="/st1/dataset/coco_vq", phase='train')
+        
+        device = "cuda"
+        CLIP, _ = clip.load("ViT-B/32", device = device, jit=False)
+
+        mean=(0.48145466, 0.4578275, 0.40821073)
+        std=(0.26862954, 0.26130258, 0.27577711)
+
+        data = CocoDataset(data_root="st1/dataset/coco_vq", phase='val')
         with torch.no_grad():
             cos_sim = []
-            for data_i in torch.utils.data.DataLoader(dataset=data, batch_size=batch_size):
+            for data_i in torch.utils.data.DataLoader(dataset=data, batch_size=batch_size, shuffle = False):
                 out = self.model.generate_content_for_metric(
                     batch=data_i,
                     filter_ratio=0,
@@ -236,9 +242,15 @@ class VQ_Diffusion():
                 print(out[0])
                 # img로 scaling
 
+                # preprocess 256 -> 224
+                out = F.interpolate(out, size=(224, 224), mode = 'area')
+                out = torchvision.transforms.Normalize(mean, std)(out)
                 img_fts = CLIP.encode_image(out)
                 img_fts = F.normalize(img_fts)
-                txt_fts = CLIP.encode_text(texts)
+                # text preprocess
+                text_tokens = clip.tokenize(data_i['text'])['token'].cuda()
+
+                txt_fts = CLIP.encode_text(text_tokens)
                 txt_fts = F.normalize(txt_fts)
                 sim = F.cosine_similarity(img_fts, txt_fts, dim=-1)
                 print("sim", sim)
@@ -330,7 +342,7 @@ if __name__ == '__main__':
     # VQ_Diffusion_model.inference_generate_sample_with_condition("a long exposure photo of waterfall", truncation_rate=1.0, save_root="RESULT", batch_size=4, guidance_scale=5.0)
 
     # Inference Improved VQ-Diffusion for metric
-    VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=1)
+    VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=5)
 
     # Inference Improved VQ-Diffusion with fast/high-quality inference
     # VQ_Diffusion_model.inference_generate_sample_with_condition("a long exposure photo of waterfall", truncation_rate=0.86, save_root="RESULT", batch_size=4, infer_speed=0.5) # high-quality inference, 0.5x inference speed

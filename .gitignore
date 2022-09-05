@@ -1,3 +1,4 @@
 OUTPUT/pretrained_model/taming_dvae/ithq_vqvae.pth
 OUTPUT/pretrained_model/ithq_learnable.pth
 OUTPUT/pretrained_model/ViT-B-32.pt
+st1/*
