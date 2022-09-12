@@ -226,8 +226,7 @@ class VQ_Diffusion():
         device = "cuda"
         CLIP, _ = clip.load("ViT-B/32", device = device, jit=False)
 
-        mean=(0.48145466, 0.4578275, 0.40821073)
-        std=(0.26862954, 0.26130258, 0.27577711)
+        mean, std = (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)
 
         data = CocoDataset(data_root="st1/dataset/coco_vq", phase='val')
         with torch.no_grad():
@@ -239,11 +238,17 @@ class VQ_Diffusion():
                     sample_type=sample_type
                 ) # B x C x H x W
 
-                print(out[0])
+                # print(out[0])
                 # img로 scaling
 
+                # image wandb log
+                out_ = out.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8)
+                for b in range(out_.shape[0]):
+                    im = Image.fromarray(out_[b])
+                    wandb.log({f"result" : wandb.Image(im, caption=data_i['text'][b])})
+
                 # preprocess 256 -> 224
-                out = F.interpolate(out, size=(224, 224), mode = 'area')
+                out = F.interpolate(out, size=(224, 224), mode = 'area') / 255.
                 out = torchvision.transforms.Normalize(mean, std)(out)
                 img_fts = CLIP.encode_image(out)
                 img_fts = F.normalize(img_fts)
@@ -254,10 +259,13 @@ class VQ_Diffusion():
                 txt_fts = F.normalize(txt_fts)
                 sim = F.cosine_similarity(img_fts, txt_fts, dim=-1)
                 print("sim", sim)
-                cos_sim.append(sim)
+                cos_sim.append(sim.to('cpu'))
+
+                if len(cos_sim) >= 50:
+                    break
             cos_sim = torch.stack(cos_sim, dim=1)
             clip_score = torch.mean(cos_sim)
-            print("final", clip_score)
+            print(schedule,"_schedule final", clip_score)
 
                 
     def mask_schedule_test(self, text, truncation_rate, save_root, batch_size, infer_speed=False, guidance_scale=1.0, prior_rule=0, prior_weight=0, learnable_cf=True, text2=False, purity_temp=1., schedule=0):
@@ -327,8 +335,24 @@ class VQ_Diffusion():
             for b in range(content.shape[0]):
                 im = Image.fromarray(content[b])
                 wandb.log({f"{i:02d}_step recon" : wandb.Image(im)})
+
 if __name__ == '__main__':
     VQ_Diffusion_model = VQ_Diffusion(config='configs/ithq.yaml', path='OUTPUT/pretrained_model/ithq_learnable.pth')
+    # wandb.init(project='clipscore_200', name = 'schedule_2')
+    VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=1)
+    # wandb.finish()
+    # wandb.init(project='clipscore_200', name = 'schedule_3')
+    VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=2)
+    # wandb.finish()
+    # wandb.init(project='clipscore_200', name = 'schedule_4')
+    VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=3)
+    # wandb.finish()
+    # wandb.init(project='clipscore_200', name = 'schedule_5')
+    VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=4)
+    # wandb.finish()
+    # wandb.init(project='clipscore_200', name = 'schedule_6')
+    VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=5)
+    VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=6)
 
     # Inference VQ-Diffusion
     # VQ_Diffusion_model.inference_generate_sample_with_condition("teddy bear playing in the pool", truncation_rate=0.86, save_root="RESULT", batch_size=4)
@@ -342,7 +366,7 @@ if __name__ == '__main__':
     # VQ_Diffusion_model.inference_generate_sample_with_condition("a long exposure photo of waterfall", truncation_rate=1.0, save_root="RESULT", batch_size=4, guidance_scale=5.0)
 
     # Inference Improved VQ-Diffusion for metric
-    VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=5)
+    # VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=1)
 
     # Inference Improved VQ-Diffusion with fast/high-quality inference
     # VQ_Diffusion_model.inference_generate_sample_with_condition("a long exposure photo of waterfall", truncation_rate=0.86, save_root="RESULT", batch_size=4, infer_speed=0.5) # high-quality inference, 0.5x inference speed

@@ -374,14 +374,54 @@ class DiffusionTransformer(nn.Module):
                 # self.content_dict[f"{mask_schedule_index}_step_token"] = temp_token
                 out = index_to_log_onehot(out2_idx, self.num_classes)
 
-            elif self.mask_schedule_test == 5: # fast uniform
+            elif self.mask_schedule_test == 5 or self.mask_schedule_test == 6: # fast uniform, purity sampling
                 log_x_idx = log_onehot_to_index(log_x)
                 out = self.log_sample_categorical(log_x_recon) # now recon
                 out_idx = log_onehot_to_index(out)
 
                 out2_idx = log_x_idx.clone() # previous
                 
-                score = torch.ones((log_x.shape[0], log_x.shape[2])).to(log_x.device)
+                if self.mask_schedule_test == 5:
+                    score = torch.ones((log_x.shape[0], log_x.shape[2])).to(log_x.device)
+                else:
+                    score = torch.exp(log_x_recon).max(dim=1).values.clamp(0, 1)
+                    score /= (score.max(dim=1, keepdim=True).values + 1e-10)
+                _score = score.clone()
+                if _score.sum() < 1e-6:
+                    _score += 1
+                _score[log_x_idx != self.num_classes - 1] = 0
+                for i in range(log_x.shape[0]): # per batch
+                    # n_sample = min(to_sample - sampled[i], max_sample_per_step)
+                    # if to_sample - sampled[i] - n_sample == 1:
+                    #     n_sample = to_sample - sampled[i]
+                    # if n_sample <= 0:
+                    #     continue
+                    sel = torch.multinomial(_score[i], self.n_sample[mask_schedule_index]) # importance sample with purity
+                    # score_matrix = _score[i].view(32, 32)
+                    # color_matrix = _score[i]
+                    # for idx in sel: # 이번에 selected -> 1 (block color)
+                    #     color_matrix[idx] = 1
+                    # color_matrix = color_matrix.view(32, 32)
+                    # an = pd.DataFrame(score_matrix.to('cpu').numpy())
+                    # df = pd.DataFrame(color_matrix.to('cpu').numpy()).replace(0, -1)
+
+                    # fig, ax = plt.subplots(figsize = (20, 20))
+                    # sns.heatmap(df, annot=an, cbar=False, fmt = '.2f', vmin = -1, vmax = 1, cmap = "Greys")
+                    # wandb.log({f"{i}_logit": wandb.Image(fig)})
+                    out2_idx[i][sel] = out_idx[i][sel]
+                    sampled[i] += ((out2_idx[i] != self.num_classes - 1).sum() - (log_x_idx[i] != self.num_classes - 1).sum()).item()
+
+                out = index_to_log_onehot(out2_idx, self.num_classes)
+
+            elif self.mask_schedule_test == 6: ## purity sampling
+                log_x_idx = log_onehot_to_index(log_x)
+                out = self.log_sample_categorical(log_x_recon) # now recon
+                out_idx = log_onehot_to_index(out)
+
+                out2_idx = log_x_idx.clone() # previous
+
+                
+
                 _score = score.clone()
                 if _score.sum() < 1e-6:
                     _score += 1
