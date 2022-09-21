@@ -1,11 +1,8 @@
 import os
-import dnnlib
-import legacy
-import copy
-import pickle
-from metrics import metric_main
-from torch_utils import misc
 import visdom
+from image_synthesis.utils.io import load_yaml_config
+from image_synthesis.modeling.build import build_model
+from image_synthesis.utils.misc import get_model_parameters_info
 
 try:
     import nsml
@@ -15,8 +12,7 @@ except ImportError:
     IS_ON_NSML = False
 
 class Logger(object):
-    def __init__(self, log_dir):
-        print('log dir: ', log_dir)
+    def __init__(self,):
         self.last = None
         self.viz = nsml.Visdom(visdom=visdom)
     
@@ -32,7 +28,7 @@ class Logger(object):
             }
         self.last[tag] = value
 
-    def images_summary(self, tag, images, step):
+    def images_summary(self, tag, images, step=0):
         self.viz.image(
             images, 
             opts = dict(title=tag, caption='%s/%d' % (tag, step)))
@@ -41,17 +37,39 @@ class Logger(object):
         pass
 
 
-def bind_model(named_models, num_gpus, device, rank, cur_nimg, run_dir, training_set_kwargs, testing_set_kwargs, metrics, metric_only_test):
-    def load(filename, **kwargs):
-        with dnnlib.util.open_url(os.path.join(filename, 'model.pkl')) as f:
-            print(f)
-            resume_data = legacy.load_network_pkl(f)
-        print(resume_data['G'])
-        for name, module in named_models:
-            if name == 'augment_pipe': continue
-            print(name, module)
-            misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
-        print('Model loaded from {}'.format(os.path.join(filename, 'model.pkl')))
+def bind_model():
+    def load(filename, config_path, imagenet_cf, ema, **kwargs):
+        model_name = os.path.basename(config_path).replace('.yaml', '')
+
+        config = load_yaml_config(config_path)
+        if imagenet_cf:
+            config['model']['params']['diffusion_config']['params']['transformer_config']['params']['class_number'] = 1001
+        model = build_model(config)
+        model_parameters = get_model_parameters_info(model)
+        print(model_parameters)
+        if os.path.exists(filename):
+            ckpt = torch.load(filename, map_location="cpu")
+        else:
+            print("Model path: {} does not exist.".format(filename))
+            exit(0)
+        
+        if 'last_epoch' in ckpt:
+            epoch = ckpt['last_epoch']
+        elif 'epoch' in ckpt:
+            epoch = ckpt['epoch']
+        else:
+            epoch = 0
+
+        missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
+        print('Model missing keys:\n', missing)
+        print('Model unexpected keys:\n', unexpected)
+
+        if ema==True and 'ema' in ckpt:
+            print("Evaluate EMA model")
+            ema_model = model.get_ema_model()
+            missing, unexpected = ema_model.load_state_dict(ckpt['ema'], strict=False)
+        
+        return {'model': model, 'epoch': epoch, 'model_name': model_name, 'parameter': model_parameters}
 
     def save(filename, **kwargs):
         snapshot_data = dict(training_set_kwargs=dict(training_set_kwargs))

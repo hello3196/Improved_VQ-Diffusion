@@ -26,6 +26,7 @@ from image_synthesis.data.mscoco_dataset import CocoDataset
 try:
     import nsml
     from nsml import IS_ON_NSML
+    from nsml_utils import bind_model, Logger
 except ImportError:
     nsml = None
     IS_ON_NSML = False
@@ -33,7 +34,13 @@ except ImportError:
 import wandb
 class VQ_Diffusion():
     def __init__(self, config, path, imagenet_cf=False):
-        self.info = self.get_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
+        if IS_ON_NSML:
+            bind_model()
+            if rank == 0:
+                self.nsml_img_logger = Logger()
+            self.info = self.get_nsml_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
+        else:
+            self.info = self.get_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
         self.model = self.info['model']
         self.epoch = self.info['epoch']
         self.model_name = self.info['model_name']
@@ -42,15 +49,18 @@ class VQ_Diffusion():
         for param in self.model.parameters(): 
             param.requires_grad=False
 
+    def get_nsml_model(self, ema, model_path, config_path, imagenet_cf):
+        resume_info = model_path.split(',')
+        checkpoint_num = resume_info[0]
+        session_name = resume_info[1]
+        print(f'Resuming from checkpoint "{checkpoint_num}", session "{session_name}"')
+        return nsml.load(checkpoint=checkpoint_num, session=session_name, map_location="cpu")
+        
+
     def get_model(self, ema, model_path, config_path, imagenet_cf):
-        if IS_ON_NSML is True:
-            resume_info = resume_pkl.split(',')
-            checkpoint_num = resume_info[0]
-            session_name = resume_info[1]
-            nsml.load(checkpoint=checkpoint_num, session = session_name)
         if 'OUTPUT' in model_path: # pretrained model
             model_name = model_path.split(os.path.sep)[-3]
-        else: 
+        else:
             model_name = os.path.basename(config_path).replace('.yaml', '')
 
         config = load_yaml_config(config_path)
@@ -64,6 +74,9 @@ class VQ_Diffusion():
         print(model_parameters)
         if os.path.exists(model_path):
             ckpt = torch.load(model_path, map_location="cpu")
+        else:
+            print("Model path: {} does not exist.".format(model_path))
+            exit(0)
 
         if 'last_epoch' in ckpt:
             epoch = ckpt['last_epoch']
@@ -80,12 +93,10 @@ class VQ_Diffusion():
             print("Evaluate EMA model")
             ema_model = model.get_ema_model()
             missing, unexpected = ema_model.load_state_dict(ckpt['ema'], strict=False)
-        
+    
         return {'model': model, 'epoch': epoch, 'model_name': model_name, 'parameter': model_parameters}
 
     def inference_generate_sample_with_class(self, text, truncation_rate, save_root, batch_size, infer_speed=False, guidance_scale=1.0):
-        os.makedirs(save_root, exist_ok=True)
-
         self.model.guidance_scale = guidance_scale
 
         data_i = {}
@@ -93,9 +104,11 @@ class VQ_Diffusion():
         data_i['image'] = None
         condition = text
 
-        str_cond = str(condition)
-        save_root_ = os.path.join(save_root, str_cond)
-        os.makedirs(save_root_, exist_ok=True)
+        if not IS_ON_NSML:
+            os.makedirs(save_root, exist_ok=True)
+            str_cond = str(condition)
+            save_root_ = os.path.join(save_root, str_cond)
+            os.makedirs(save_root_, exist_ok=True)
 
         with torch.no_grad():
             model_out = self.model.generate_content(
@@ -110,16 +123,19 @@ class VQ_Diffusion():
         # save results
         content = model_out['content']
         content = content.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8)
+
         for b in range(content.shape[0]):
             cnt = b
             save_base_name = '{}'.format(str(cnt).zfill(6))
-            save_path = os.path.join(save_root_, save_base_name+'.jpg')
             im = Image.fromarray(content[b])
-            im.save(save_path)
+            if IS_ON_NSML:
+                self.nsml_img_logger.images_summary(save_base_name, im)
+            else:
+                save_path = os.path.join(save_root_, save_base_name+'.jpg')
+                im.save(save_path)
+            
 
     def inference_generate_sample_with_condition(self, text, truncation_rate, save_root, batch_size, infer_speed=False, guidance_scale=1.0, prior_rule=0, prior_weight=0, learnable_cf=True, text2=False, purity_temp=1., ):
-        os.makedirs(save_root, exist_ok=True)
-
         self.model.guidance_scale = guidance_scale
         self.model.learnable_cf = self.model.transformer.learnable_cf = learnable_cf # whether to use learnable classifier-free
         self.model.transformer.prior_rule = prior_rule      # inference rule: 0 for VQ-Diffusion v1, 1 for only high-quality inference, 2 for purity prior
@@ -136,9 +152,11 @@ class VQ_Diffusion():
         data_i['image'] = None
         condition = text
 
-        str_cond = str(condition)
-        save_root_ = os.path.join(save_root, str_cond)
-        os.makedirs(save_root_, exist_ok=True)
+        if not IS_ON_NSML:
+            os.makedirs(save_root, exist_ok=True)
+            str_cond = str(condition)
+            save_root_ = os.path.join(save_root, str_cond)
+            os.makedirs(save_root_, exist_ok=True)
 
         if infer_speed != False:
             add_string = 'r,time'+str(infer_speed)
@@ -161,9 +179,12 @@ class VQ_Diffusion():
         for b in range(content.shape[0]):
             cnt = b
             save_base_name = '{}'.format(str(cnt).zfill(6))
-            save_path = os.path.join(save_root_, save_base_name+'.png')
             im = Image.fromarray(content[b])
-            im.save(save_path)
+            if IS_ON_NSML:
+                self.nsml_img_logger.images_summary(save_base_name, im)
+            else:
+                save_path = os.path.join(save_root_, save_base_name+'.png')
+                im.save(save_path)
         
         # recon log step by step
         # for i in range(9):
@@ -288,7 +309,6 @@ class VQ_Diffusion():
 
         5) random (fast)
         """
-        os.makedirs(save_root, exist_ok=True)
 
         self.model.guidance_scale = guidance_scale
         self.model.learnable_cf = self.model.transformer.learnable_cf = learnable_cf # whether to use learnable classifier-free
@@ -307,9 +327,11 @@ class VQ_Diffusion():
         data_i['image'] = None
         condition = text
 
-        str_cond = str(condition)
-        save_root_ = os.path.join(save_root, str_cond)
-        os.makedirs(save_root_, exist_ok=True)
+        if not IS_ON_NSML:
+            os.makedirs(save_root, exist_ok=True)
+            str_cond = str(condition)
+            save_root_ = os.path.join(save_root, str_cond)
+            os.makedirs(save_root_, exist_ok=True)
 
         if infer_speed != False:
             add_string = 'r,time'+str(infer_speed)
@@ -332,18 +354,24 @@ class VQ_Diffusion():
         for b in range(content.shape[0]):
             cnt = b
             save_base_name = '{}'.format(str(cnt).zfill(6))
-            save_path = os.path.join(save_root_, save_base_name+'.png')
             im = Image.fromarray(content[b])
             wandb.log({"result" : wandb.Image(im)})
-            im.save(save_path)
+            if IS_ON_NSML:
+                self.nsml_img_logger.images_summary(save_base_name, im)
+            else:
+                save_path = os.path.join(save_root_, save_base_name+'.png')
+                im.save(save_path)
 
         # recon log step by step
         for i in range(16):
             content = model_out[f"{i}_step_token"]
             content = content.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8)
             for b in range(content.shape[0]):
+                save_base_name = str(i) + '{}'.format(str(cnt).zfill(6))
                 im = Image.fromarray(content[b])
                 wandb.log({f"{i:02d}_step recon" : wandb.Image(im)})
+                if IS_ON_NSML:
+                    self.nsml_img_logger.images_summary(save_base_name, im)
 if __name__ == '__main__':
     VQ_Diffusion_model = VQ_Diffusion(config='configs/ithq.yaml', path='OUTPUT/pretrained_model/ithq_learnable.pth')
 
