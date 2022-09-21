@@ -18,6 +18,13 @@ from image_synthesis.engine.logger import Logger
 from image_synthesis.engine.solver import Solver
 from image_synthesis.distributed.launch import launch
 
+try:
+    import nsml
+    from nsml import IS_ON_NSML
+except ImportError:
+    nsml = None
+    IS_ON_NSML = False
+
 # environment variables
 NODE_RANK = os.environ['AZ_BATCHAI_TASK_INDEX'] if 'AZ_BATCHAI_TASK_INDEX' in os.environ else 0
 NODE_RANK = int(NODE_RANK)
