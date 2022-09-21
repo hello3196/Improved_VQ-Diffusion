@@ -426,6 +426,40 @@ class DiffusionTransformer(nn.Module):
                 
                 out = index_to_log_onehot(out2_idx, self.num_classes)
 
+            elif self.mask_schedule_test == 7: # 7) random & random revoke(replace)                                
+                out = self.log_sample_categorical(log_x_recon)
+                out_idx = log_onehot_to_index(out) # x0 recon
+                out2_idx = torch.full_like(out_idx, self.num_classes - 1).to(out_idx.device) # all mask index list
+                score = torch.ones((log_x.shape[0], log_x.shape[2])).to(log_x.device)
+
+                for i in range(log_x.shape[0]): # per batch
+                    # n_sample = min(to_sample - sampled[i], max_sample_per_step)
+                    # if to_sample - sampled[i] - n_sample == 1:
+                    #     n_sample = to_sample - sampled[i]
+                    # if n_sample <= 0:
+                    #     continue
+                    sel = torch.multinomial(score[i], 64 * (mask_schedule_index + 1)) # importance sample with purity
+                    # score_matrix = _score[i].view(32, 32)
+                    # color_matrix = _score[i]
+                    # for idx in sel: # 이번에 selected -> 1 (block color)
+                    #     color_matrix[idx] = 1
+                    # color_matrix = color_matrix.view(32, 32)
+                    # an = pd.DataFrame(score_matrix.to('cpu').numpy())
+                    # df = pd.DataFrame(color_matrix.to('cpu').numpy()).replace(0, -1)
+
+                    # fig, ax = plt.subplots(figsize = (20, 20))
+                    # sns.heatmap(df, annot=an, cbar=False, fmt = '.2f', vmin = -1, vmax = 1, cmap = "Greys")
+                    # wandb.log({f"{i}_logit": wandb.Image(fig)})
+                    out2_idx[i][sel] = out_idx[i][sel]
+                    sampled[i] += (out_idx[i] != self.num_classes - 1).sum()
+                    sel_batch = torch.cat((sel_batch, sel.unsqueeze(0)), 0)
+
+                # recon log
+                temp_token = log_onehot_to_index(log_x_recon)
+                self.content_dict[f"{mask_schedule_index}_step_token"] = temp_token
+                
+                out = index_to_log_onehot(out2_idx, self.num_classes)
+
             # sample probability log (mask 아닌 곳 제외)
             recon_p = torch.exp(log_x_recon)
             sel_batch = sel_batch.type(torch.int64)

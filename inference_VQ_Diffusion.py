@@ -279,6 +279,9 @@ class VQ_Diffusion():
         4) grid: uniform
 
         5) random (fast)
+        6) purity
+
+        7) random & random revoke
         """
         os.makedirs(save_root, exist_ok=True)
 
@@ -450,6 +453,48 @@ class VQ_Diffusion():
         masked_recon_path = os.path.join(save_root, 'masked_recon.png')
         im.save(masked_recon_path)
 
+    
+    def generate_sample_with_replacement(self, text, truncation_rate, save_root, batch_size, infer_speed=False, guidance_scale=1.0, prior_rule=0, prior_weight=0, learnable_cf=True):
+        os.makedirs(save_root, exist_ok=True)
+
+        self.model.guidance_scale = guidance_scale
+        self.model.learnable_cf = self.model.transformer.learnable_cf = learnable_cf # whether to use learnable classifier-free
+        self.model.transformer.prior_rule = prior_rule      # inference rule: 0 for VQ-Diffusion v1, 1 for only high-quality inference, 2 for purity prior
+        self.model.transformer.prior_weight = prior_weight  # probability adjust parameter, 'r' in Equation.11 of Improved VQ-Diffusion
+
+        data_i = {}
+        data_i['text'] = [text]
+        data_i['image'] = None
+        condition = text
+
+        str_cond = str(condition)
+        save_root_ = os.path.join(save_root, str_cond)
+        os.makedirs(save_root_, exist_ok=True)
+
+        if infer_speed != False:
+            add_string = 'r,time'+str(infer_speed)
+        else:
+            add_string = 'r'
+        with torch.no_grad():
+            model_out = self.model.generate_content(
+                batch=data_i,
+                filter_ratio=0,
+                replicate=batch_size,
+                content_ratio=1,
+                return_att_weight=False,
+                sample_type="top"+str(truncation_rate)+add_string,
+            ) # B x C x H x W
+
+        # save results
+        content = model_out['content']
+        content = content.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8)
+        for b in range(content.shape[0]):
+            cnt = b
+            save_base_name = '{}'.format(str(cnt).zfill(6))
+            save_path = os.path.join(save_root_, save_base_name+'.png')
+            im = Image.fromarray(content[b])
+            im.save(save_path)
+
 
 
 if __name__ == '__main__':
@@ -463,14 +508,14 @@ if __name__ == '__main__':
     # wandb.init(project='clipscore_200', name = 'schedule_4')
     # VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=3)
     # wandb.finish()
-    wandb.init(project='recon_test_2', name = 'schedule_4_child')
-    VQ_Diffusion_model.mask_schedule_test("Some children are sitting in the classroom", truncation_rate=0.86, save_root="exp/mask_schedule_test/grid_uniform", batch_size=4, guidance_scale = 5.0, schedule=4)
-    wandb.finish()
-    wandb.init(project='recon_test_2', name = 'schedule_5_child')
-    VQ_Diffusion_model.mask_schedule_test("Some children are sitting in the classroom", truncation_rate=0.86, save_root="exp/mask_schedule_test/grid_uniform", batch_size=4, guidance_scale = 5.0, schedule=5)
-    wandb.finish()
-    wandb.init(project='recon_test_2', name = 'schedule_6_child')
-    VQ_Diffusion_model.mask_schedule_test("Some children are sitting in the classroom", truncation_rate=0.86, save_root="exp/mask_schedule_test/grid_uniform", batch_size=4, guidance_scale = 5.0, schedule=6)
+    wandb.init(project='recon_replacement', name = 'bear')
+    VQ_Diffusion_model.mask_schedule_test("A photo of a confused grizzly bear in calculus class", truncation_rate=0.86, save_root="exp/mask_schedule_test/grid_uniform", batch_size=4, guidance_scale = 5.0, schedule=7)
+    # wandb.finish()
+    # wandb.init(project='recon_test_2', name = 'schedule_5_child')
+    # VQ_Diffusion_model.mask_schedule_test("Some children are sitting in the classroom", truncation_rate=0.86, save_root="exp/mask_schedule_test/grid_uniform", batch_size=4, guidance_scale = 5.0, schedule=5)
+    # wandb.finish()
+    # wandb.init(project='recon_test_2', name = 'schedule_6_child')
+    # VQ_Diffusion_model.mask_schedule_test("Some children are sitting in the classroom", truncation_rate=0.86, save_root="exp/mask_schedule_test/grid_uniform", batch_size=4, guidance_scale = 5.0, schedule=6)
     # wandb.init(project='clipscore_200', name = 'schedule_5')
     # VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=5)
     # wandb.finish()

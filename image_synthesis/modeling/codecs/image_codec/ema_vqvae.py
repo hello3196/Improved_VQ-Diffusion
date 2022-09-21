@@ -111,7 +111,7 @@ class PatchVQVAE(BaseCodec):
         return imgs
 
     def get_tokens(self, imgs, **kwargs):
-        imgs = self.preprocess(imgs)
+        # imgs = self.preprocess(imgs)
         code = self.enc(imgs)
         output = {'token': code}
         # output = {'token': rearrange(code, 'b h w -> b (h w)')}
