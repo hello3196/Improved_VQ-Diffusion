@@ -194,7 +194,7 @@ class VQ_Diffusion():
         #         im = Image.fromarray(content[b])
         #         wandb.log({f"{i}_step recon" : wandb.Image(im)})
 
-    def inference_generate_sample_for_metric(self, truncation_rate, batch_size, infer_speed=False, guidance_scale=1.0, prior_rule=0, prior_weight=0, learnable_cf=True, text2=False, purity_temp=1., schedule=0):
+    def inference_generate_sample_for_clip_score(self, truncation_rate, batch_size, infer_speed=False, guidance_scale=1.0, prior_rule=0, prior_weight=0, learnable_cf=True, text2=False, purity_temp=1., schedule=0):
         """
         T = 16 fix
         schedule = 1 ~ 4
@@ -387,7 +387,7 @@ if __name__ == '__main__':
     # VQ_Diffusion_model.inference_generate_sample_with_condition("a long exposure photo of waterfall", truncation_rate=1.0, save_root="RESULT", batch_size=4, guidance_scale=5.0)
 
     # Inference Improved VQ-Diffusion for metric
-    VQ_Diffusion_model.inference_generate_sample_for_metric(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=5)
+    VQ_Diffusion_model.inference_generate_sample_for_clip_score(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=5)
 
     # Inference Improved VQ-Diffusion with fast/high-quality inference
     # VQ_Diffusion_model.inference_generate_sample_with_condition("a long exposure photo of waterfall", truncation_rate=0.86, save_root="RESULT", batch_size=4, infer_speed=0.5) # high-quality inference, 0.5x inference speed
