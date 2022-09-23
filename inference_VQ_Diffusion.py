@@ -53,7 +53,7 @@ class VQ_Diffusion():
         resume_info = model_path.split(',')
         checkpoint_num = resume_info[0]
         session_name = resume_info[1]
-        print(f'Resuming from checkpoint "{checkpoint_num}", session "{session_name}"')
+        print(f'Resuming from checkpoint {checkpoint_num}, session {session_name}')
         return nsml.load(checkpoint=checkpoint_num, session=session_name, map_location="cpu")
         
 

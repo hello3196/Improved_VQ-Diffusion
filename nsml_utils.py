@@ -1,5 +1,6 @@
 import os
 import visdom
+import wget
 from image_synthesis.utils.io import load_yaml_config
 from image_synthesis.modeling.build import build_model
 from image_synthesis.utils.misc import get_model_parameters_info
@@ -72,18 +73,9 @@ def bind_model():
         return {'model': model, 'epoch': epoch, 'model_name': model_name, 'parameter': model_parameters}
 
     def save(filename, **kwargs):
-        snapshot_data = dict(training_set_kwargs=dict(training_set_kwargs))
-        for name, module in named_models:
-            if module is not None:
-                if num_gpus > 1:
-                    misc.check_ddp_consistency(module, ignore_regex=r'.*\.w_avg')
-                module = copy.deepcopy(module).eval().requires_grad_(False).cpu()
-            snapshot_data[name] = module
-            del module # conserve memory
-            
-            if rank == 0:
-                with open(os.path.join(filename, 'model.pkl'), 'wb') as fp:
-                    pickle.dump(snapshot_data, fp)
+        wget.download("https://facevcstandard.blob.core.windows.net/t-shuygu/release_model/VQ-Diffusion/pretrained_model/ViT-B-32.pt?sv=2019-12-12&st=2022-03-09T01%3A57%3A52Z&se=2028-04-10T01%3A57%3A00Z&sr=b&sp=r&sig=bj5P0BbkreoGdbjDK4sZ5tis%2BwltrVAiN9DQdmzHpEE%3D")
+        wget.download("https://facevcstandard.blob.core.windows.net/v-zhictang/Improved-VQ-Diffusion_model_release/coco_learnable.pth?sv=2020-10-02&st=2022-05-30T10%3A21%3A22Z&se=2030-05-31T10%3A21%3A00Z&sr=b&sp=r&sig=nhTx1%2B6rK6hWR9CVGuPauKnamayHXfDu1E8RGD5%2FRw0%3D")
+        #wget.download("")
 
     def infer(input):
         stats_metrics = dict()
@@ -97,4 +89,4 @@ def bind_model():
         return stats_metrics
 
     if IS_ON_NSML is True:
-        nsml.bind(save=save, load=load, infer=infer, rank=rank, cur_nimg=cur_nimg)
+        nsml.bind(save=save, load=load, infer=infer)
