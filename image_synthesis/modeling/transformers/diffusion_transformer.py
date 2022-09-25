@@ -453,13 +453,13 @@ class DiffusionTransformer(nn.Module):
                     out2_idx[i][sel] = out_idx[i][sel]
                     sampled[i] += (out_idx[i] != self.num_classes - 1).sum()
                     sel_batch = torch.cat((sel_batch, sel.unsqueeze(0)), 0)
-
+                """
                 # recon log
                 temp_token = log_onehot_to_index(log_x_recon)
                 self.content_dict[f"{mask_schedule_index}_step_token"] = temp_token
-                
+                """
                 out = index_to_log_onehot(out2_idx, self.num_classes)
-
+            """
             # sample probability log (mask 아닌 곳 제외)
             recon_p = torch.exp(log_x_recon)
             sel_batch = sel_batch.type(torch.int64)
@@ -472,7 +472,7 @@ class DiffusionTransformer(nn.Module):
                 fig = pd.DataFrame(vv[i].to('cpu').numpy()).plot(legend=False, xticks = [0, 1, 2, 3], ylim = (0, 0.5), grid=True).get_figure()
                 wandb.log({f"{i}_recon probability(selected)":wandb.Image(fig)})
                 plt.close()
-
+            """
         elif t[0] > 0 and self.prior_rule > 0 and self.prior_rule < 3 and to_sample is not None: # prior_rule: 0 for VQ-Diffusion v1, 1 for only high-quality inference, 2 for purity prior
             log_x_idx = log_onehot_to_index(log_x)
 
@@ -1070,16 +1070,16 @@ class DiffusionTransformer(nn.Module):
                     while min(sampled) < self.n_sample[i]: 
                         log_z, sampled = self.p_sample(log_z, cond_emb, t, sampled, self.n_sample[i], mask_schedule_index = i)     
                         # token log step by step
-                        log_z_index = log_onehot_to_index(log_z)
-                        for i in range(batch_size):
-                            log_z_2d = log_z_index[i].view(32, 32)
-                            df = pd.DataFrame(log_z_2d.to('cpu').numpy())
-                            an = df.replace(self.num_classes - 1, 'mask').astype('str')
-                            df = df.replace(self.num_classes - 1, -(self.num_classes - 1)) # for cmap
-                            fig, ax = plt.subplots(figsize = (20, 20))
-                            sns.heatmap(df, annot=an, cbar=False, fmt = '', vmin = -4096, vmax = 4096)
-                            wandb.log({f"{i}_content": wandb.Image(fig)})
-                            plt.close()
+                        # log_z_index = log_onehot_to_index(log_z)
+                        # for i in range(batch_size):
+                        #     log_z_2d = log_z_index[i].view(32, 32)
+                        #     df = pd.DataFrame(log_z_2d.to('cpu').numpy())
+                        #     an = df.replace(self.num_classes - 1, 'mask').astype('str')
+                        #     df = df.replace(self.num_classes - 1, -(self.num_classes - 1)) # for cmap
+                        #     fig, ax = plt.subplots(figsize = (20, 20))
+                        #     sns.heatmap(df, annot=an, cbar=False, fmt = '', vmin = -4096, vmax = 4096)
+                        #     wandb.log({f"{i}_content": wandb.Image(fig)})
+                        #     plt.close()
                             # print(f"{i}_batch mask num: {(log_z_index[i] == self.num_classes - 1).sum()}")
                             # print(f"sampled: {sampled[i]}")
                             
