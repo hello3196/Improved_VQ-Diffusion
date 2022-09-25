@@ -5,3 +5,4 @@ pip install wandb
 
 pip install regex
 pip install pandas
+pip install pytorch-lightning

@@ -364,7 +364,7 @@ class VQ_Diffusion():
                 
 
                 # preprocess 256 -> 224
-                out = F.interpolate(out, size=(224, 224), mode = 'area')
+                out = F.interpolate(out, size=(224, 224), mode = 'area') / 255.
                 out = torchvision.transforms.Normalize(mean, std)(out)
                 img_fts = CLIP.encode_image(out)
                 img_fts = F.normalize(img_fts)
@@ -391,7 +391,11 @@ class VQ_Diffusion():
         4) grid: uniform
 
         5) random (fast)
+        6) purity
+
+        7) random & random revoke
         """
+        os.makedirs(save_root, exist_ok=True)
 
         self.model.guidance_scale = guidance_scale
         self.model.learnable_cf = self.model.transformer.learnable_cf = learnable_cf # whether to use learnable classifier-free
@@ -455,8 +459,162 @@ class VQ_Diffusion():
                 wandb.log({f"{i:02d}_step recon" : wandb.Image(im)})
                 if IS_ON_NSML:
                     self.nsml_img_logger.images_summary(save_base_name, im)
+
+    def recon_test(self, img_root):
+        save_root = os.path.join(img_root, 'recon')
+        os.makedirs(save_root, exist_ok=True)
+        input_images_list = glob.glob(img_root + '/*.jpg')
+        preprocess = torchvision.transforms.Compose([
+            torchvision.transforms.Resize(256),
+            torchvision.transforms.CenterCrop(256),
+            torchvision.transforms.ToTensor()
+        ])
+
+        imgs = torch.tensor([])
+        for f in input_images_list:
+            img = Image.open(f)
+            img = preprocess(img).unsqueeze(0)
+            imgs = torch.cat((imgs, img), 0)
+
+        content = self.model.reconstruct(imgs) # torch.tensor(b, img)
+        # content = recon['content']
+        content = content.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8)
+        for b in range(content.shape[0]):
+            cnt = b
+            save_base_name = '{}'.format(str(cnt).zfill(6))
+            save_path = os.path.join(save_root, save_base_name+'.png')
+            im = Image.fromarray(content[b])
+            im.save(save_path)
+
+    def mask_recon_test(self, text, truncation_rate, img_root, batch_size, noise_t, recon_step, guidance_scale=1.0, prior_rule=0, prior_weight=0): 
+        """
+        input
+        =============================================
+        text: "~"
+        img_root: coco image location
+        noise_t: t forward step (1 ~ 100)
+            initial token -> fixed, all batch same
+        recon_step: recon을 몇 step?
+        =============================================
+
+        1) image input(root) -> image
+        2) image tokenizing
+        3) image masking(handmade? random?) -> 일단 random으로 구현, mask_num
+        # mask_num에 따른 t는 dalle에서 연산? ->  O
+        # 몇번 iterative하게 sampling할 것 인지는 setting? 
+
+        study:
+        1) 몇개 구멍 뚫고, one step recon & 여러번 step으로 recon (기존 sampling에다가 initial condition으로만)
+        2) 중요 부분 많이 뚫어서 -> step?
+        3) 실제 recon을 내가 손대서 quality 높여볼까?
+
+        self.model.transformer.q_pred(log_x_start, t) => 기존처럼 sampling (given initial condition)
+        
+
+        """
+        self.model.guidance_scale = guidance_scale
+        self.model.learnable_cf = self.model.transformer.learnable_cf = True
+
+        save_root = os.path.join(os.path.dirname(img_root), 'recon', f"{text}_{noise_t}_{recon_step}")
+        os.makedirs(save_root, exist_ok=True)
+        data_i = {}
+        data_i['text'] = [text]
+        
+        condition = text
+
+        preprocess = torchvision.transforms.Compose([
+            torchvision.transforms.Resize(256),
+            torchvision.transforms.CenterCrop(256),
+            torchvision.transforms.ToTensor()
+        ])
+        img = Image.open(img_root)
+        img = preprocess(img).unsqueeze(0) # 1, 3, 256, 256
+
+        data_i['image'] = img
+
+        with torch.no_grad():
+            model_out = self.model.mask_recon(
+                batch=data_i,
+                filter_ratio=0,
+                replicate=batch_size,
+                content_ratio=1,
+                return_att_weight=False,
+                truncation_rate=truncation_rate,
+                noise_t = noise_t,
+                recon_step = recon_step
+            ) 
+
+        content = model_out['content']
+        content = content.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8)
+        for b in range(content.shape[0]):
+            cnt = b
+            save_base_name = '{}'.format(str(cnt).zfill(6))
+            save_path = os.path.join(save_root, save_base_name +'.png')
+            im = Image.fromarray(content[b])
+            im.save(save_path)
+
+        masked_index = model_out['masked_index'].to('cpu') # [masked_num]
+        recon_token = model_out['recon_token'].squeeze().to('cpu') # 3, 256, 256
+
+        recon_token = recon_token.permute(1, 2, 0).numpy().astype(np.uint8)
+        im = Image.fromarray(recon_token)
+
+        # recon img
+        recon_path = os.path.join(save_root, 'recon.png')
+        im.save(recon_path)
+
+        # recon img with mask
+        draw = ImageDraw.Draw(im)        
+        for idx in masked_index:
+            x, y = divmod(int(idx), 32)
+            draw.rectangle((y*8, x*8, y*8+8, x*8+8), outline = 'black', fill = 'black')
+        masked_recon_path = os.path.join(save_root, 'masked_recon.png')
+        im.save(masked_recon_path)
+
+
+    def generate_sample_with_replacement(self, text, truncation_rate, save_root, batch_size, infer_speed=False, guidance_scale=1.0, prior_rule=0, prior_weight=0, learnable_cf=True):
+        os.makedirs(save_root, exist_ok=True)
+
+        self.model.guidance_scale = guidance_scale
+        self.model.learnable_cf = self.model.transformer.learnable_cf = learnable_cf # whether to use learnable classifier-free
+        self.model.transformer.prior_rule = prior_rule      # inference rule: 0 for VQ-Diffusion v1, 1 for only high-quality inference, 2 for purity prior
+        self.model.transformer.prior_weight = prior_weight  # probability adjust parameter, 'r' in Equation.11 of Improved VQ-Diffusion
+
+        data_i = {}
+        data_i['text'] = [text]
+        data_i['image'] = None
+        condition = text
+
+        str_cond = str(condition)
+        save_root_ = os.path.join(save_root, str_cond)
+        os.makedirs(save_root_, exist_ok=True)
+
+        if infer_speed != False:
+            add_string = 'r,time'+str(infer_speed)
+        else:
+            add_string = 'r'
+        with torch.no_grad():
+            model_out = self.model.generate_content(
+                batch=data_i,
+                filter_ratio=0,
+                replicate=batch_size,
+                content_ratio=1,
+                return_att_weight=False,
+                sample_type="top"+str(truncation_rate)+add_string,
+            ) # B x C x H x W
+
+        # save results
+        content = model_out['content']
+        content = content.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8)
+        for b in range(content.shape[0]):
+            cnt = b
+            save_base_name = '{}'.format(str(cnt).zfill(6))
+            save_path = os.path.join(save_root_, save_base_name+'.png')
+            im = Image.fromarray(content[b])
+            im.save(save_path)
 if __name__ == '__main__':
-    VQ_Diffusion_model = VQ_Diffusion(config='configs/ithq.yaml', path='OUTPUT/pretrained_model/ithq_learnable.pth')
+    VQ_Diffusion_model = VQ_Diffusion(config='configs/coco_tune.yaml', path='OUTPUT/pretrained_model/coco_learnable.pth')
+    # VQ_Diffusion_model = VQ_Diffusion(config='configs/ithq.yaml', path='OUTPUT/pretrained_model/ithq_learnable.pth')
 
     # Inference VQ-Diffusion
     # VQ_Diffusion_model.inference_generate_sample_with_condition("teddy bear playing in the pool", truncation_rate=0.86, save_root="RESULT", batch_size=4)

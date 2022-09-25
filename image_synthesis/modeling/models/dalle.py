@@ -16,6 +16,7 @@ import os
 import pandas as pd 
 import wandb
 
+from ..transformers.diffusion_transformer import *
 from torch.cuda.amp import autocast
 
 class DALLE(nn.Module):
@@ -153,6 +154,112 @@ class DALLE(nn.Module):
 
         else:
             print("wrong sample type")
+
+    @torch.no_grad() # input: image_tensor, text condition(same setting), t(num)
+    def mask_recon(
+        self,
+        *,
+        batch,
+        condition=None,
+        filter_ratio = 0.5,
+        temperature = 1.0,
+        content_ratio = 0.0,
+        replicate=1,
+        return_att_weight=False,
+        truncation_rate,
+        noise_t,
+        recon_step
+    ):
+        """
+        1) condition setting V
+        2) input image -> token
+        3) token -> masking
+        4) masked token -> initial point
+        """
+        self.eval()
+        if condition is None:
+            condition = self.prepare_condition(batch=batch)
+        else:
+            condition = self.prepare_condition(batch=None, condition=condition)
+        
+        batch_size = len(batch['text']) * replicate
+
+        if self.learnable_cf:
+            cf_cond_emb = self.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
+        else:
+            batch['text'] = [''] * batch_size
+            cf_condition = self.prepare_condition(batch=batch)
+            cf_cond_emb = self.transformer.condition_emb(cf_condition['condition_token']).float()
+        
+        
+        """
+        img forward noist_t step
+
+        1) batch['image'] -> tokenizing
+        2) forward noise_t step
+        3) repeat replicate
+        """
+        noise_t = torch.tensor(noise_t).unsqueeze(0).to(self.device)
+        img = batch['image'].to(self.device) # 1, 3, 256, 256
+        img_token = self.content_codec.get_tokens(img)['token'] # 1, 1024
+        img = index_to_log_onehot(img_token, self.transformer.num_classes) # 1, 4096, 1024
+        log_xt = self.transformer.q_sample(log_x_start=img, t=noise_t) # masked onehot: 1, 4096, 1024
+        initial_token = log_onehot_to_index(log_xt) # masked index : 1, 1024
+        masked_index = (initial_token.squeeze() == self.transformer.num_classes - 1).nonzero().squeeze() # [masked_num]
+
+        initial_token = initial_token.repeat(replicate, 1) # b, 1024
+        masked_num = []
+        for i in range(replicate):
+            masked_num.append((initial_token[i] == self.transformer.num_classes - 1).sum().item())
+        def cf_predict_start(log_x_t, cond_emb, t):
+            log_x_recon = self.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
+            if abs(self.guidance_scale - 1) < 1e-3:
+                return torch.cat((log_x_recon, self.transformer.zero_vector), dim=1)
+            cf_log_x_recon = self.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
+     
+            log_new_x_recon = cf_log_x_recon + self.guidance_scale * (log_x_recon - cf_log_x_recon)
+            log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
+            log_new_x_recon = log_new_x_recon.clamp(-70, 0)
+            log_pred = torch.cat((log_new_x_recon, self.transformer.zero_vector), dim=1)
+
+            return log_pred
+
+        if replicate != 1:
+            for k in condition.keys():
+                if condition[k] is not None:
+                    condition[k] = torch.cat([condition[k] for _ in range(replicate)], dim=0)
+                
+            
+        content_token = None
+
+        if self.truncation_forward == False:
+            self.transformer.cf_predict_start = self.predict_start_with_truncation(cf_predict_start, 'top' + str(truncation_rate) + 'r')
+            self.truncation_forward = True
+        
+        self.transformer.update_n_sample()
+        trans_out = self.transformer.sample_with_initial_token(condition_token=condition['condition_token'],
+                                            masked_token=initial_token, # initial token index : b, 1024
+                                            masked_token_num=masked_num, # list for deterministic work, later
+                                            noise_t=noise_t, # forward process noise_t
+                                            t=recon_step,  # how many steps for reconstruction for deterministic work,
+                                            ) 
+
+        img_token = self.content_codec.decode(img_token)
+        content = self.content_codec.decode(trans_out['content_token'])  #(8,1024)->(8,3,256,256)
+
+        self.train()
+        out = {
+            'content': content,
+            'masked_index' : masked_index,
+            'recon_token' : img_token
+        }
+        # # recon log
+        # for i in range(16):
+        #     out[f"{i}_step_token"] = self.content_codec.decode(self.transformer.content_dict[f"{i}_step_token"])
+        # self.train()
+
+        return out
+
 
     @torch.no_grad()
     def generate_content(

@@ -338,7 +338,7 @@ class DiffusionTransformer(nn.Module):
     @torch.no_grad()
     def p_sample(self, log_x, cond_emb, t, sampled=None, to_sample=None, mask_schedule_index=None):               # sample q(xt-1) for next step from  xt, actually is p(xt-1|xt)
         model_log_prob, log_x_recon = self.p_pred(log_x, cond_emb, t)
-
+        
         max_sample_per_step = self.prior_ps  # max number to sample per step
         if self.mask_schedule_test != 0 and t[0] > 0 and to_sample is not None: # mask_schedule_test
             """
@@ -352,6 +352,7 @@ class DiffusionTransformer(nn.Module):
             5) fast (uniform)
             self.sel_list = self.mask_schedule(self.mask_schedule_test)
             """ 
+            sel_batch = torch.tensor([]).to('cuda')
             if self.mask_schedule_test < 5:
                 log_x_idx = log_onehot_to_index(log_x)
                 out = self.log_sample_categorical(log_x_recon) # now recon
@@ -368,64 +369,35 @@ class DiffusionTransformer(nn.Module):
                     sel = self.sel_list[mask_schedule_index] # importance sample with purity
                     out2_idx[i][sel] = out_idx[i][sel]
                     sampled[i] += ((out2_idx[i] != self.num_classes - 1).sum() - (log_x_idx[i] != self.num_classes - 1).sum()).item()
+                    sel_batch = torch.cat((sel_batch, sel.to('cuda').unsqueeze(0)), 0)
 
                 # recon log
-                # temp_token = log_onehot_to_index(log_x_recon)
-                # self.content_dict[f"{mask_schedule_index}_step_token"] = temp_token
+                temp_token = log_onehot_to_index(log_x_recon)
+                self.content_dict[f"{mask_schedule_index}_step_token"] = temp_token
+
                 out = index_to_log_onehot(out2_idx, self.num_classes)
 
             elif self.mask_schedule_test == 5 or self.mask_schedule_test == 6: # fast uniform, purity sampling
                 log_x_idx = log_onehot_to_index(log_x)
-                out = self.log_sample_categorical(log_x_recon) # now recon
-                out_idx = log_onehot_to_index(out)
-
-                out2_idx = log_x_idx.clone() # previous
                 
                 if self.mask_schedule_test == 5:
                     score = torch.ones((log_x.shape[0], log_x.shape[2])).to(log_x.device)
-                else:
+                    prob = log_x_recon
+                else: #6
                     score = torch.exp(log_x_recon).max(dim=1).values.clamp(0, 1)
                     score /= (score.max(dim=1, keepdim=True).values + 1e-10)
-                _score = score.clone()
-                if _score.sum() < 1e-6:
-                    _score += 1
-                _score[log_x_idx != self.num_classes - 1] = 0
-                for i in range(log_x.shape[0]): # per batch
-                    # n_sample = min(to_sample - sampled[i], max_sample_per_step)
-                    # if to_sample - sampled[i] - n_sample == 1:
-                    #     n_sample = to_sample - sampled[i]
-                    # if n_sample <= 0:
-                    #     continue
-                    sel = torch.multinomial(_score[i], self.n_sample[mask_schedule_index]) # importance sample with purity
-                    # score_matrix = _score[i].view(32, 32)
-                    # color_matrix = _score[i]
-                    # for idx in sel: # 이번에 selected -> 1 (block color)
-                    #     color_matrix[idx] = 1
-                    # color_matrix = color_matrix.view(32, 32)
-                    # an = pd.DataFrame(score_matrix.to('cpu').numpy())
-                    # df = pd.DataFrame(color_matrix.to('cpu').numpy()).replace(0, -1)
-
-                    # fig, ax = plt.subplots(figsize = (20, 20))
-                    # sns.heatmap(df, annot=an, cbar=False, fmt = '.2f', vmin = -1, vmax = 1, cmap = "Greys")
-                    # wandb.log({f"{i}_logit": wandb.Image(fig)})
-                    out2_idx[i][sel] = out_idx[i][sel]
-                    sampled[i] += ((out2_idx[i] != self.num_classes - 1).sum() - (log_x_idx[i] != self.num_classes - 1).sum()).item()
-
-                out = index_to_log_onehot(out2_idx, self.num_classes)
-
-            elif self.mask_schedule_test == 6: ## purity sampling
-                log_x_idx = log_onehot_to_index(log_x)
-                out = self.log_sample_categorical(log_x_recon) # now recon
+                    prob = ((1 + score * 2).unsqueeze(1) * log_x_recon).softmax(dim=1) # weight = 2
+                    prob = prob.log().clamp(-70, 0)
+                
+                out = self.log_sample_categorical(prob)
                 out_idx = log_onehot_to_index(out)
 
-                out2_idx = log_x_idx.clone() # previous
-
-                
-
+                out2_idx = log_x_idx.clone()
                 _score = score.clone()
                 if _score.sum() < 1e-6:
                     _score += 1
                 _score[log_x_idx != self.num_classes - 1] = 0
+
                 for i in range(log_x.shape[0]): # per batch
                     # n_sample = min(to_sample - sampled[i], max_sample_per_step)
                     # if to_sample - sampled[i] - n_sample == 1:
@@ -446,10 +418,61 @@ class DiffusionTransformer(nn.Module):
                     # wandb.log({f"{i}_logit": wandb.Image(fig)})
                     out2_idx[i][sel] = out_idx[i][sel]
                     sampled[i] += ((out2_idx[i] != self.num_classes - 1).sum() - (log_x_idx[i] != self.num_classes - 1).sum()).item()
+                    sel_batch = torch.cat((sel_batch, sel.unsqueeze(0)), 0)
 
+                # recon log
+                temp_token = log_onehot_to_index(log_x_recon)
+                self.content_dict[f"{mask_schedule_index}_step_token"] = temp_token
+                
                 out = index_to_log_onehot(out2_idx, self.num_classes)
 
+            elif self.mask_schedule_test == 7: # 7) random & random revoke(replace)                                
+                out = self.log_sample_categorical(log_x_recon)
+                out_idx = log_onehot_to_index(out) # x0 recon
+                out2_idx = torch.full_like(out_idx, self.num_classes - 1).to(out_idx.device) # all mask index list
+                score = torch.ones((log_x.shape[0], log_x.shape[2])).to(log_x.device)
 
+                for i in range(log_x.shape[0]): # per batch
+                    # n_sample = min(to_sample - sampled[i], max_sample_per_step)
+                    # if to_sample - sampled[i] - n_sample == 1:
+                    #     n_sample = to_sample - sampled[i]
+                    # if n_sample <= 0:
+                    #     continue
+                    sel = torch.multinomial(score[i], 64 * (mask_schedule_index + 1)) # importance sample with purity
+                    # score_matrix = _score[i].view(32, 32)
+                    # color_matrix = _score[i]
+                    # for idx in sel: # 이번에 selected -> 1 (block color)
+                    #     color_matrix[idx] = 1
+                    # color_matrix = color_matrix.view(32, 32)
+                    # an = pd.DataFrame(score_matrix.to('cpu').numpy())
+                    # df = pd.DataFrame(color_matrix.to('cpu').numpy()).replace(0, -1)
+
+                    # fig, ax = plt.subplots(figsize = (20, 20))
+                    # sns.heatmap(df, annot=an, cbar=False, fmt = '.2f', vmin = -1, vmax = 1, cmap = "Greys")
+                    # wandb.log({f"{i}_logit": wandb.Image(fig)})
+                    out2_idx[i][sel] = out_idx[i][sel]
+                    sampled[i] += (out_idx[i] != self.num_classes - 1).sum()
+                    sel_batch = torch.cat((sel_batch, sel.unsqueeze(0)), 0)
+                """
+                # recon log
+                temp_token = log_onehot_to_index(log_x_recon)
+                self.content_dict[f"{mask_schedule_index}_step_token"] = temp_token
+                """
+                out = index_to_log_onehot(out2_idx, self.num_classes)
+            """
+            # sample probability log (mask 아닌 곳 제외)
+            recon_p = torch.exp(log_x_recon)
+            sel_batch = sel_batch.type(torch.int64)
+            recon_p = torch.gather(recon_p, 2, sel_batch.unsqueeze(1).repeat(1, 4096, 1))
+            # not_mask = log_x_idx != self.num_classes -1 # sampled locationn들 -> 0 으로
+            # for i in range(log_x.shape[0]):
+                # recon_p[i, :, not_mask[i]] = 0
+            vv, ii = torch.topk(recon_p, 5, dim=1)
+            for i in range(log_x.shape[0]):
+                fig = pd.DataFrame(vv[i].to('cpu').numpy()).plot(legend=False, xticks = [0, 1, 2, 3], ylim = (0, 0.5), grid=True).get_figure()
+                wandb.log({f"{i}_recon probability(selected)":wandb.Image(fig)})
+                plt.close()
+            """
         elif t[0] > 0 and self.prior_rule > 0 and self.prior_rule < 3 and to_sample is not None: # prior_rule: 0 for VQ-Diffusion v1, 1 for only high-quality inference, 2 for purity prior
             log_x_idx = log_onehot_to_index(log_x)
 
@@ -1063,6 +1086,54 @@ class DiffusionTransformer(nn.Module):
             output['logits'] = torch.exp(log_z)
         return output
 
+
+    def sample_with_initial_token(
+            self,
+            condition_token,
+            masked_token,       # initial token index : b, 1024
+            masked_token_num,   # list for deterministic work, later
+            noise_t,            # forward process noise_t
+            t,                   # how many steps for reconstruction for deterministic work, later
+            **kwargs):  
+        input = {'condition_token' : condition_token,  # BPE text token -> same with base setting
+                'masked_token' : masked_token,         # initial token index : b, 1024
+                'masked_token_num' : masked_token_num, # list for deterministic work, later
+                'noise_t' : t,                         # forward process noise_t
+                't' : t                                # how many steps for reconstruction
+                }
+        device = self.log_at.device
+        batch_size = input['condition_token'].shape[0]
+
+        with torch.no_grad():
+            cond_emb = self.condition_emb(input['condition_token']) # B x Ld x D   #256*1024
+        cond_emb = cond_emb.float()
+
+        # recon one-step given masked_token
+        masked_token = index_to_log_onehot(input['masked_token'], self.num_classes) # b, 4096, 1024
+        log_z = masked_token
+        start_step = input['noise_t']
+        skip_step = start_step // input['t']
+        with torch.no_grad():
+            diffusion_list = [index for index in range(start_step, -1, -1-skip_step)]
+            if diffusion_list[-1] != 0:
+                diffusion_list.append(0)
+            for n, diffusion_index in enumerate(diffusion_list):
+                t = torch.full((batch_size,), diffusion_index, device=device, dtype=torch.long)
+                log_x_recon = self.cf_predict_start(log_z, cond_emb, t)
+                if diffusion_index > skip_step:
+                    model_log_prob = self.q_posterior(log_x_start=log_x_recon, log_x_t=log_z, t=t-skip_step)
+                else:
+                    model_log_prob = self.q_posterior(log_x_start=log_x_recon, log_x_t=log_z, t=t)
+
+                log_z = self.log_sample_categorical(model_log_prob)
+                # temp_token = log_onehot_to_index(log_x_recon)
+                # output[f"{n}_step_token"] = temp_token
+
+        content_token = log_onehot_to_index(log_z)
+        
+        output = {'content_token': content_token}
+
+        return output
 
 # compositional -> X 폐기
     def sample_fast_comp(

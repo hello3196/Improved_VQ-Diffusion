@@ -6,14 +6,15 @@ import os
 import json
 import random
 from image_synthesis.utils.misc import instantiate_from_config
-
+from image_synthesis.utils.io import load_yaml_config
 def load_img(filepath):
     img = Image.open(filepath).convert('RGB')
     return img
 
 class CocoDataset(Dataset):
-    def __init__(self, data_root, phase = 'train', im_preprocessor_config=None, drop_caption_rate=0.0):
-        self.transform = instantiate_from_config(im_preprocessor_config)
+    def __init__(self, data_root, phase = 'train', im_preprocessor_config='coco_config.yaml', drop_caption_rate=0.0):
+        im_config = load_yaml_config(im_preprocessor_config)
+        self.transform = instantiate_from_config(im_config)
         self.root = os.path.join(data_root, phase)
         # input_file = os.path.join(data_root, input_file)
         caption_file = "captions_"+phase+"2014.json"

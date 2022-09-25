@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 import dnnlib
 from image_synthesis.data.mscoco_dataset import CocoDataset 
 

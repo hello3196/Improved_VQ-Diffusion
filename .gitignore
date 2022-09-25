@@ -4,3 +4,5 @@ OUTPUT/pretrained_model/ViT-B-32.pt
 st1/*
 wandb/*
 nohup.out
+*.pyc
+*.png
