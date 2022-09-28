@@ -5,6 +5,7 @@ from PIL import Image
 import os
 import json
 import random
+import torch
 from image_synthesis.utils.misc import instantiate_from_config
 from image_synthesis.utils.io import load_yaml_config
 def load_img(filepath):

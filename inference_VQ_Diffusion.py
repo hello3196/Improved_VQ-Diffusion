@@ -6,6 +6,7 @@
 # ------------------------------------------
 
 import os
+import glob
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
 
@@ -16,6 +17,7 @@ import argparse
 import numpy as np
 import torchvision
 from PIL import Image
+
 
 import scipy.linalg
 import get_FID
@@ -43,13 +45,13 @@ class VQ_Diffusion():
             # self.info = self.get_nsml_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
         else:
             self.info = self.get_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
-        # self.model = self.info['model']
-        # self.epoch = self.info['epoch']
-        # self.model_name = self.info['model_name']
-        # self.model = self.model.cuda()
-        # self.model.eval()
-        # for param in self.model.parameters(): 
-        #     param.requires_grad=False
+            self.model = self.info['model']
+            self.epoch = self.info['epoch']
+            self.model_name = self.info['model_name']
+            self.model = self.model.cuda()
+            self.model.eval()
+            for param in self.model.parameters(): 
+                param.requires_grad=False
 
     def get_nsml_model(self, ema, model_path, config_path, imagenet_cf):
         resume_info = model_path.split(',')
@@ -208,55 +210,49 @@ class VQ_Diffusion():
         5) random (fast)
         """
 
-        # self.model.guidance_scale = guidance_scale
-        # self.model.learnable_cf = self.model.transformer.learnable_cf = learnable_cf # whether to use learnable classifier-free
-        # self.model.transformer.prior_rule = prior_rule      # inference rule: 0 for VQ-Diffusion v1, 1 for only high-quality inference, 2 for purity prior
-        # self.model.transformer.prior_weight = prior_weight  # probability adjust parameter, 'r' in Equation.11 of Improved VQ-Diffusion
-        # self.model.transformer.purity_temp = purity_temp
-        # self.model.transformer.mask_schedule_test = schedule
+        self.model.guidance_scale = guidance_scale
+        self.model.learnable_cf = self.model.transformer.learnable_cf = learnable_cf # whether to use learnable classifier-free
+        self.model.transformer.prior_rule = prior_rule      # inference rule: 0 for VQ-Diffusion v1, 1 for only high-quality inference, 2 for purity prior
+        self.model.transformer.prior_weight = prior_weight  # probability adjust parameter, 'r' in Equation.11 of Improved VQ-Diffusion
+        self.model.transformer.purity_temp = purity_temp
+        self.model.transformer.mask_schedule_test = schedule
+
+        """
+        schedule 수정 (step, schedule = 7 ...)
+        """
+        self.model.transformer.n_sample = [10] + [21, 20] * 24 + [30] # T=50
+        if schedule == 7:
+            for s in range(1, len(self.model.transformer.n_sample)):
+                self.model.transformer.n_sample[s] += self.model.transformer.n_sample[s - 1]
 
         if infer_speed != False:
             add_string = 'r,time'+str(infer_speed)
         else:
             add_string = 'r'
 
-        # self.model.eval()
-        # cf_cond_emb = self.model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
+        self.model.eval()
+        cf_cond_emb = self.model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
 
-        # def cf_predict_start(log_x_t, cond_emb, t):
-        #     log_x_recon = self.model.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
-        #     if abs(self.model.guidance_scale - 1) < 1e-3:
-        #         return torch.cat((log_x_recon, self.model.transformer.zero_vector), dim=1)
-        #     cf_log_x_recon = self.model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
-
-        #     # print(f"[{t}]no condition: ", cf_log_x_recon)
-        #     # print(f"[{t}]condition: ", log_x_recon)            
-        #     log_new_x_recon = cf_log_x_recon + self.model.guidance_scale * (log_x_recon - cf_log_x_recon)
-        #     log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
-        #     log_new_x_recon = log_new_x_recon.clamp(-70, 0)
-        #     log_pred = torch.cat((log_new_x_recon, self.model.transformer.zero_vector), dim=1)
-
-            # c_mat = (log_x_recon - torch.logsumexp(log_x_recon, dim=1, keepdim=True)).clamp(-70, 0)
-            # n_mat = (cf_log_x_recon - torch.logsumexp(cf_log_x_recon, dim=1, keepdim=True)).clamp(-70, 0)
-
-            # c_mat = torch.stack(c_mat.max(dim=1), dim = 1)
-            # n_mat = torch.stack(n_mat.max(dim=1), dim = 1)
-            
-            # for n_m, c_m in zip(n_mat, c_mat):
-            #     wandb.log({
-            #         'logit_max log(no condition)' : pd.DataFrame(n_m.view(2*32, 32).to('cpu').numpy()),
-            #         'logit_max log(condition)' : pd.DataFrame(c_m.view(2*32, 32).to('cpu').numpy()) 
-            #     })
-            # return log_pred
+        def cf_predict_start(log_x_t, cond_emb, t):
+            log_x_recon = self.model.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
+            if abs(self.model.guidance_scale - 1) < 1e-3:
+                return torch.cat((log_x_recon, self.model.transformer.zero_vector), dim=1)
+            cf_log_x_recon = self.model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
+     
+            log_new_x_recon = cf_log_x_recon + self.model.guidance_scale * (log_x_recon - cf_log_x_recon)
+            log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
+            log_new_x_recon = log_new_x_recon.clamp(-70, 0)
+            log_pred = torch.cat((log_new_x_recon, self.model.transformer.zero_vector), dim=1)
+            return log_pred
 
         sample_type = "top"+str(truncation_rate)+add_string
 
-        # if len(sample_type.split(',')) > 1: # fast
-        #     if sample_type.split(',')[1][:1]=='q':
-        #         self.model.transformer.p_sample = self.model.p_sample_with_truncation(self.model.transformer.p_sample, sample_type.split(',')[1])
-        # if sample_type.split(',')[0][:3] == "top" and self.model.truncation_forward == False:
-        #     self.model.transformer.cf_predict_start = self.model.predict_start_with_truncation(cf_predict_start, sample_type.split(',')[0])
-        #     self.model.truncation_forward = True
+        if len(sample_type.split(',')) > 1: # fast
+            if sample_type.split(',')[1][:1]=='q':
+                self.model.transformer.p_sample = self.model.p_sample_with_truncation(self.model.transformer.p_sample, sample_type.split(',')[1])
+        if sample_type.split(',')[0][:3] == "top" and self.model.truncation_forward == False:
+            self.model.transformer.cf_predict_start = self.model.predict_start_with_truncation(cf_predict_start, sample_type.split(',')[0])
+            self.model.truncation_forward = True
 
         if IS_ON_NSML is True:
             data_root = os.path.join(nsml.DATASET_PATH, 'train')
@@ -268,9 +264,9 @@ class VQ_Diffusion():
         detector_kwargs = dict(return_features=True)
 
         mu_real, sigma_real = get_FID.get_real_FID(data_root=data_root, detector_url=detector_url, detector_kwargs=detector_kwargs,
-                            device=device, batch_size=batch_size, rel_lo=0, rel_hi=0, capture_mean_cov=True).get_mean_cov
+                            device=device, batch_size=batch_size, rel_lo=0, rel_hi=0, capture_mean_cov=True).get_mean_cov()
         mu_gen, sigma_gen = get_FID.get_gen_FID(data_root=data_root, model=self.model, detector_url=detector_url, detector_kwargs=detector_kwargs,
-                            device=device, batch_size=batch_size, sample_type=sample_type, rel_lo=0, rel_hi=1, capture_mean_cov=True).get_mean_cov
+                            device=device, batch_size=batch_size, sample_type=sample_type, rel_lo=0, rel_hi=1, capture_mean_cov=True).get_mean_cov()
 
         m = np.square(mu_gen - mu_real).sum()
         s, _ = scipy.linalg.sqrtm(np.dot(sigma_gen, sigma_real), disp=False) # pylint: disable=no-member
@@ -612,8 +608,32 @@ class VQ_Diffusion():
             save_path = os.path.join(save_root_, save_base_name+'.png')
             im = Image.fromarray(content[b])
             im.save(save_path)
+
+    
+    def real_mask_recon(self, data_i, truncation_rate, guidance_scale=5.0): 
+        """
+        data_i = {'image': b, c, h, w, 'text': b, ~}
+        """
+        self.model.guidance_scale = guidance_scale
+        self.model.learnable_cf = self.model.transformer.learnable_cf = True
+
+        with torch.no_grad():
+            model_out = self.model.real_mask_return(
+                batch=data_i,
+                filter_ratio=0,
+                content_ratio=1,
+                return_att_weight=False,
+                truncation_rate=truncation_rate,
+            ) # {'t', 'changed', 'recon_token'}
+
+        return model_out
+
+
 if __name__ == '__main__':
     VQ_Diffusion_model = VQ_Diffusion(config='configs/coco_tune.yaml', path='OUTPUT/pretrained_model/coco_learnable.pth')
+    wandb.init(project='FID_50test', name = 'schedule_7_coco')
+    VQ_Diffusion_model.inference_generate_sample_for_fid(truncation_rate=0.86, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=7)
+    # VQ_Diffusion_model.recon_test('/content/drive/MyDrive/VQ/Improved_VQ-Diffusion/blur_test')
     # VQ_Diffusion_model = VQ_Diffusion(config='configs/ithq.yaml', path='OUTPUT/pretrained_model/ithq_learnable.pth')
 
     # Inference VQ-Diffusion
@@ -628,7 +648,7 @@ if __name__ == '__main__':
     # VQ_Diffusion_model.inference_generate_sample_with_condition("a long exposure photo of waterfall", truncation_rate=1.0, save_root="RESULT", batch_size=4, guidance_scale=5.0)
 
     # Inference Improved VQ-Diffusion for metric
-    VQ_Diffusion_model.inference_generate_sample_for_fid(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=5)
+   
 
     # Inference Improved VQ-Diffusion with fast/high-quality inference
     # VQ_Diffusion_model.inference_generate_sample_with_condition("a long exposure photo of waterfall", truncation_rate=0.86, save_root="RESULT", batch_size=4, infer_speed=0.5) # high-quality inference, 0.5x inference speed

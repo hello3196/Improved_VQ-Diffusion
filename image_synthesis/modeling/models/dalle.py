@@ -259,7 +259,61 @@ class DALLE(nn.Module):
         # self.train()
 
         return out
+    
 
+    @torch.no_grad() # input: image_tensor, text condition(same setting), t(num)
+    def real_mask_return(
+        self,
+        *,
+        batch,
+        condition=None,
+        filter_ratio = 0.5,
+        temperature = 1.0,
+        content_ratio = 0.0,
+        return_att_weight=False,
+        truncation_rate,
+    ):
+        """
+        CF 부분 제외 가능 -> inference에서 정의
+        
+        """
+        self.eval()
+        if condition is None:
+            condition = self.prepare_condition(batch=batch)
+        else:
+            condition = self.prepare_condition(batch=None, condition=condition)     
+        
+        """
+        condition -> clip condition으로
+        image tokenizing 정도 -> 나머지는 diffusion에서
+
+        diffusion 내부에서
+            forward noise
+            recon generate
+            return {time_step, unmasked location -> for label, recon_token -> dataset}
+        """
+        img = batch['image'].to(self.device) # b, 3, 256, 256
+        img_token = self.content_codec.get_tokens(img)['token'] # b, 1024
+
+        trans_out = self.transformer.mask_and_recon(
+            condition_token = condition['condition_token'],
+            real_token = img_token
+            ) 
+
+        # img_token = self.content_codec.decode(img_token)
+
+        # self.train()
+        # out = {
+        #     ''content': content,
+        #     'masked_index' : masked_index,
+        #     'recon_token' : img_token'
+        # }
+        # # recon log
+        # for i in range(16):
+        #     out[f"{i}_step_token"] = self.content_codec.decode(self.transformer.content_dict[f"{i}_step_token"])
+        # self.train()
+
+        return trans_out
 
     @torch.no_grad()
     def generate_content(
@@ -423,7 +477,7 @@ class DALLE(nn.Module):
         
         if composition != False: # If condition exist -> composition
             condition2 = self.prepare_condition2(batch=batch)
-
+        
         if self.transformer.mask_schedule_test != 0:
             trans_out = self.transformer.sample_mask_schedule(condition_token=condition['condition_token'],
                                             condition_mask=condition.get('condition_mask', None),

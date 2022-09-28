@@ -3,6 +3,8 @@ import numpy as np
 import dnnlib
 from image_synthesis.data.mscoco_dataset import CocoDataset 
 
+from PIL import Image
+import wandb
 # def open_url(url: str, cache_dir: str = None, num_attempts: int = 10, verbose: bool = True, return_filename: bool = False, cache: bool = True) -> Any:
 #     """Download the given URL and return a binary-mode file object to access the data."""
 #     assert num_attempts >= 1
@@ -183,9 +185,11 @@ def get_real_FID(data_root, detector_url, detector_kwargs, device, batch_size, r
     detector = get_feature_detector(url=detector_url, device=device, num_gpus=1, rank=0)
     
     with torch.no_grad():
-        for data_i in torch.utils.data.DataLoader(dataset=data, batch_size=batch_size, shuffle = False):
-            features = detector(data_i["image"].to(device), **detector_kwargs)
+        for b, data_i in enumerate(torch.utils.data.DataLoader(dataset=data, batch_size=batch_size, shuffle = False)):
+            features = detector(data_i["image"].to(device), **detector_kwargs) # b, c, h, w
             stats.append_torch(features, num_gpus=1, rank=0)
+            if b >= 199:
+                break
             # progress.update(stats.num_items)
             del data_i
     return stats
@@ -195,19 +199,30 @@ def get_gen_FID(data_root, model, detector_url, detector_kwargs, device, batch_s
 
     num_items = len(data)
     stats = FeatureStats(max_items=num_items, **stats_kwargs)
-    progress = progress.sub(tag='generator features', num_items=num_items, rel_lo=rel_lo, rel_hi=rel_hi)
-    detector = get_feature_detector(url=detector_url, device=device, num_gpus=1, rank=0, verbose=progress.verbose)
+    # progress = progress.sub(tag='generator features', num_items=num_items, rel_lo=rel_lo, rel_hi=rel_hi)
+    # detector = get_feature_detector(url=detector_url, device=device, num_gpus=1, rank=0, verbose=progress.verbose)
+    detector = get_feature_detector(url=detector_url, device=device, num_gpus=1, rank=0)
 
     with torch.no_grad():
-        for data_i in torch.utils.data.DataLoader(dataset=data, batch_size=batch_size, shuffle = False):
+        for bb, data_i in enumerate(torch.utils.data.DataLoader(dataset=data, batch_size=batch_size, shuffle = False)):
             out = model.generate_content_for_metric(
                 batch=data_i,
                 filter_ratio=0,
                 sample_type=sample_type
             ) # B x C x H x W
 
+            # image wandb log
+            out_ = out.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8) # b, h, w, c
+            for b in range(out_.shape[0]):
+                im = Image.fromarray(out_[b])
+                wandb.log({f"result" : wandb.Image(im, caption=data_i['text'][b])})
+
             features = detector(out, **detector_kwargs)
+            # print(features)
             stats.append_torch(features, num_gpus=1, rank=0)
-            progress.update(stats.num_items)
+            # progress.update(stats.num_items)
+            print(bb)
+            if bb >= 199:
+                break
             del out, data_i
     return stats

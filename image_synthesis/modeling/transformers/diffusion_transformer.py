@@ -438,7 +438,7 @@ class DiffusionTransformer(nn.Module):
                     #     n_sample = to_sample - sampled[i]
                     # if n_sample <= 0:
                     #     continue
-                    sel = torch.multinomial(score[i], 64 * (mask_schedule_index + 1)) # importance sample with purity
+                    sel = torch.multinomial(score[i], self.n_sample[mask_schedule_index]) # importance sample with purity
                     # score_matrix = _score[i].view(32, 32)
                     # color_matrix = _score[i]
                     # for idx in sel: # 이번에 selected -> 1 (block color)
@@ -1059,13 +1059,12 @@ class DiffusionTransformer(nn.Module):
             start_step = self.num_timesteps
             with torch.no_grad():
                 # step = 16 fixed
-                self.n_sample = [64] * 16
-                diffusion_list = [index for index in range(100 -5, -1, -6)]
+                # self.n_sample = [64] * 16
+                diffusion_list = [index for index in range(100 -1, -1, -2)]
                 for i, diffusion_index in enumerate(diffusion_list):
                     t = torch.full((batch_size,), diffusion_index, device=device, dtype=torch.long)
                     sampled = [0] * log_z.shape[0]
-                    while min(sampled) < self.n_sample[i]: 
-                        log_z, sampled = self.p_sample(log_z, cond_emb, t, sampled, self.n_sample[i], mask_schedule_index = i)     
+                    log_z, sampled = self.p_sample(log_z, cond_emb, t, sampled, self.n_sample[i], mask_schedule_index = i)     
                         # token log step by step
                         # log_z_index = log_onehot_to_index(log_z)
                         # for i in range(batch_size):
@@ -1132,6 +1131,47 @@ class DiffusionTransformer(nn.Module):
         content_token = log_onehot_to_index(log_z)
         
         output = {'content_token': content_token}
+
+        return output
+
+    def mask_and_recon(
+            self,
+            condition_token,
+            real_token,       # initial token index : b, 1024
+            **kwargs):  
+        """
+        output: {time_step, unmasked & masked_location -> label, recon_token -> dataset}
+        """
+        device = self.log_at.device
+        input = {'condition_token' : condition_token,  # BPE text token -> same with base setting
+                'real_token' : real_token.to(device),             # real coco token index : b, 1024
+                }
+        batch_size = input['condition_token'].shape[0]
+
+        with torch.no_grad():
+            cond_emb = self.condition_emb(input['condition_token']) # B x Ld x D   #256*1024
+        cond_emb = cond_emb.float()
+
+        # time sampling
+        t, pt = self.sample_time(batch_size, device, 'importance')
+        # real_token -> masking & finding changed location
+        real_token = index_to_log_onehot(input['real_token'], self.num_classes) # b, 4096, 1024
+        log_xt = self.q_sample(log_x_start=real_token, t=t) # noised token with random t, log p form
+        masked_token = log_onehot_to_index(log_xt) # masked index b, 1024
+        # changed location
+        changed = input['real_token'] != masked_token # changed = True, not_changed = False
+
+        # recon one-step given masked_token
+        masked_token = index_to_log_onehot(masked_token, self.num_classes)
+        log_z = masked_token
+
+        log_x_recon = self.cf_predict_start(log_z, cond_emb, t)
+        log_z = self.log_sample_categorical(log_x_recon)
+
+        content_token = log_onehot_to_index(log_z)
+        
+        # output = {'content_token': content_token}
+        output = {'t': t, 'changed': changed, 'recon_token': content_token}
 
         return output
 

@@ -6,3 +6,5 @@ wandb/*
 nohup.out
 *.pyc
 *.png
+*.jpg
+*.zip
