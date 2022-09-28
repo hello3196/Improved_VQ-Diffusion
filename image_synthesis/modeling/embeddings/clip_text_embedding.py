@@ -3,6 +3,9 @@ import torch.nn as nn
 from image_synthesis.modeling.modules.clip import clip
 from image_synthesis.modeling.modules.clip import model as clip_model
 from .base_embedding import BaseEmbedding
+import os
+
+import nsml
 
 class CLIPTextEmbedding(BaseEmbedding):
     def __init__(self, 

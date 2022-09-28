@@ -94,12 +94,13 @@ def get_feature_detector(url, device=torch.device('cpu'), num_gpus=1, rank=0, ve
 
 def get_real_FID(data_root, detector_url, detector_kwargs, device, batch_size, rel_lo=0, rel_hi=1, **stats_kwargs):
     data = CocoDataset(data_root=data_root, phase='val')
-
+    print(1)
     num_items = len(data)
     stats = FeatureStats(max_items=num_items, **stats_kwargs)
+    print(2)
     # progress = progress.sub(tag='dataset features', num_items=num_items, rel_lo=rel_lo, rel_hi=rel_hi)
     detector = get_feature_detector(url=detector_url, device=device, num_gpus=1, rank=0)
-    
+    print(3)
     with torch.no_grad():
         for data_i in torch.utils.data.DataLoader(dataset=data, batch_size=batch_size, shuffle = False):
             features = detector(data_i["image"].to(device), **detector_kwargs)

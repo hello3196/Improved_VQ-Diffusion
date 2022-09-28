@@ -30,16 +30,24 @@ try:
     import nsml
     from nsml import IS_ON_NSML
     from nsml_utils import bind_model, Logger
+    data = os.path.join(nsml.DATASET_PATH[0], 'train')
+    clip_model_path = os.path.join(nsml.DATASET_PATH[1], 'train/ViT-B-32.pt')
+    diffusion_model_path = os.path.join(nsml.DATASET_PATH[2], 'train/ithq_learnable.pth')
+    vqvae_model_path = os.path.join(nsml.DATASET_PATH[3], 'train/ithq_vqvae.pth')
 except ImportError:
     nsml = None
     IS_ON_NSML = False
 
 import wandb
+
+resume_nsml_model = False
+
 class VQ_Diffusion():
     def __init__(self, config, path, imagenet_cf=False):
         if IS_ON_NSML:
             bind_model()
             self.nsml_img_logger = Logger()
+        if resume_nsml_model:
             self.info = self.get_nsml_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
         else:
             self.info = self.get_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
@@ -57,13 +65,13 @@ class VQ_Diffusion():
         session_name = resume_info[1]
         print(f'Resuming from checkpoint {checkpoint_num}, session {session_name}')
         return nsml.load(checkpoint=checkpoint_num, session=session_name, map_location="cpu")
-        
 
     def get_model(self, ema, model_path, config_path, imagenet_cf):
-        if 'OUTPUT' in model_path: # pretrained model
-            model_name = model_path.split(os.path.sep)[-3]
-        else:
-            model_name = os.path.basename(config_path).replace('.yaml', '')
+        # if 'OUTPUT' in model_path: # pretrained model
+        #     model_name = model_path.split(os.path.sep)[-3]
+        # else:
+        #     model_name = os.path.basename(config_path).replace('.yaml', '')
+        model_name = model_path
 
         config = load_yaml_config(config_path)
 
@@ -259,7 +267,7 @@ class VQ_Diffusion():
             self.model.truncation_forward = True
 
         if IS_ON_NSML is True:
-            data_root = os.path.join(nsml.DATASET_PATH, 'train')
+            data_root = data
         else:
             data_root = "st1/dataset/coco_vq"
 
@@ -613,7 +621,7 @@ class VQ_Diffusion():
             im = Image.fromarray(content[b])
             im.save(save_path)
 if __name__ == '__main__':
-    VQ_Diffusion_model = VQ_Diffusion(config='configs/coco_tune.yaml', path='OUTPUT/pretrained_model/coco_learnable.pth')
+    VQ_Diffusion_model = VQ_Diffusion(config='configs/ithq.yaml', path=diffusion_model_path)
     # VQ_Diffusion_model = VQ_Diffusion(config='configs/ithq.yaml', path='OUTPUT/pretrained_model/ithq_learnable.pth')
 
     # Inference VQ-Diffusion

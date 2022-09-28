@@ -13,6 +13,8 @@ import math
 import yaml
 from image_synthesis.utils.misc import instantiate_from_config
 
+import nsml
+
 class Encoder(nn.Module):
     def __init__(self, encoder, quant_conv, quantize):
         super().__init__()
@@ -57,7 +59,8 @@ class PatchVQVAE(BaseCodec):
         super().__init__()
         
         config_path = "OUTPUT/pretrained_model/taming_dvae/config.yaml"
-        ckpt_path="OUTPUT/pretrained_model/taming_dvae/ithq_vqvae.pth"
+        # ckpt_path="OUTPUT/pretrained_model/taming_dvae/ithq_vqvae.pth"
+        ckpt_path = os.path.join(nsml.DATASET_PATH[3], 'train/ithq_vqvae.pth')
         model = self.LoadModel(config_path, ckpt_path)
 
         self.enc = Encoder(model.encoder, model.quant_conv, model.quantize)

@@ -72,10 +72,15 @@ def bind_model():
         
         return {'model': model, 'epoch': epoch, 'model_name': model_name, 'parameter': model_parameters}
 
-    def save(filename, **kwargs):
-        wget.download("https://facevcstandard.blob.core.windows.net/t-shuygu/release_model/VQ-Diffusion/pretrained_model/ViT-B-32.pt?sv=2019-12-12&st=2022-03-09T01%3A57%3A52Z&se=2028-04-10T01%3A57%3A00Z&sr=b&sp=r&sig=bj5P0BbkreoGdbjDK4sZ5tis%2BwltrVAiN9DQdmzHpEE%3D")
-        wget.download("https://facevcstandard.blob.core.windows.net/v-zhictang/Improved-VQ-Diffusion_model_release/coco_learnable.pth?sv=2020-10-02&st=2022-05-30T10%3A21%3A22Z&se=2030-05-31T10%3A21%3A00Z&sr=b&sp=r&sig=nhTx1%2B6rK6hWR9CVGuPauKnamayHXfDu1E8RGD5%2FRw0%3D")
-        #wget.download("")
+    def save(filename=0, **kwargs):
+        # wget.download("https://facevcstandard.blob.core.windows.net/t-shuygu/release_model/VQ-Diffusion/pretrained_model/ViT-B-32.pt?sv=2019-12-12&st=2022-03-09T01%3A57%3A52Z&se=2028-04-10T01%3A57%3A00Z&sr=b&sp=r&sig=bj5P0BbkreoGdbjDK4sZ5tis%2BwltrVAiN9DQdmzHpEE%3D")
+        # wget.download("https://facevcstandard.blob.core.windows.net/v-zhictang/Improved-VQ-Diffusion_model_release/coco_learnable.pth?sv=2020-10-02&st=2022-05-30T10%3A21%3A22Z&se=2030-05-31T10%3A21%3A00Z&sr=b&sp=r&sig=nhTx1%2B6rK6hWR9CVGuPauKnamayHXfDu1E8RGD5%2FRw0%3D")
+        print("pre")
+        out="."
+        print(os.listdir(out))
+        wget.download("https://facevcstandard.blob.core.windows.net/t-shuygu/release_model/VQ-Diffusion/pretrained_model/ViT-B-32.pt?sv=2019-12-12&st=2022-03-09T01%3A57%3A52Z&se=2028-04-10T01%3A57%3A00Z&sr=b&sp=r&sig=bj5P0BbkreoGdbjDK4sZ5tis%2BwltrVAiN9DQdmzHpEE%3D", out=out)
+        print(os.listdir(out))
+        print("post")
 
     def infer(input):
         stats_metrics = dict()
