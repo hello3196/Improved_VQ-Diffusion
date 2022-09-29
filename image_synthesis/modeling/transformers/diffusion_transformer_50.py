@@ -1058,14 +1058,11 @@ class DiffusionTransformer(nn.Module):
             log_z = torch.log(mask_logits)
             start_step = self.num_timesteps
             with torch.no_grad():
-                # step = 16 fixed
-                self.n_sample = [64] * 16
-                diffusion_list = [index for index in range(100 -5, -1, -6)]
+                diffusion_list = [index for index in range(100 -1, -1, -2)]
                 for i, diffusion_index in enumerate(diffusion_list):
                     t = torch.full((batch_size,), diffusion_index, device=device, dtype=torch.long)
                     sampled = [0] * log_z.shape[0]
-                    while min(sampled) < self.n_sample[i]: 
-                        log_z, sampled = self.p_sample(log_z, cond_emb, t, sampled, self.n_sample[i], mask_schedule_index = i)     
+                    log_z, sampled = self.p_sample(log_z, cond_emb, t, sampled, self.n_sample[i], mask_schedule_index = i)     
                         # token log step by step
                         # log_z_index = log_onehot_to_index(log_z)
                         # for i in range(batch_size):

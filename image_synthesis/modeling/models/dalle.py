@@ -260,6 +260,59 @@ class DALLE(nn.Module):
 
         return out
 
+    @torch.no_grad() # input: image_tensor, text condition(same setting), t(num)
+    def real_mask_return(
+        self,
+        *,
+        batch,
+        condition=None,
+        filter_ratio = 0.5,
+        temperature = 1.0,
+        content_ratio = 0.0,
+        return_att_weight=False,
+        truncation_rate,
+    ):
+        """
+        CF 부분 제외 가능 -> inference에서 정의
+        
+        """
+        self.eval()
+        if condition is None:
+            condition = self.prepare_condition(batch=batch)
+        else:
+            condition = self.prepare_condition(batch=None, condition=condition)     
+        
+        """
+        condition -> clip condition으로
+        image tokenizing 정도 -> 나머지는 diffusion에서
+
+        diffusion 내부에서
+            forward noise
+            recon generate
+            return {time_step, unmasked location -> for label, recon_token -> dataset}
+        """
+        img = batch['image'].to(self.device) # b, 3, 256, 256
+        img_token = self.content_codec.get_tokens(img)['token'] # b, 1024
+
+        trans_out = self.transformer.mask_and_recon(
+            condition_token = condition['condition_token'],
+            real_token = img_token
+            ) 
+
+        # img_token = self.content_codec.decode(img_token)
+
+        # self.train()
+        # out = {
+        #     ''content': content,
+        #     'masked_index' : masked_index,
+        #     'recon_token' : img_token'
+        # }
+        # # recon log
+        # for i in range(16):
+        #     out[f"{i}_step_token"] = self.content_codec.decode(self.transformer.content_dict[f"{i}_step_token"])
+        # self.train()
+
+        return trans_out
 
     @torch.no_grad()
     def generate_content(
@@ -301,24 +354,11 @@ class DALLE(nn.Module):
                 return torch.cat((log_x_recon, self.transformer.zero_vector), dim=1)
             cf_log_x_recon = self.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
 
-            # print(f"[{t}]no condition: ", cf_log_x_recon)
-            # print(f"[{t}]condition: ", log_x_recon)            
+        
             log_new_x_recon = cf_log_x_recon + self.guidance_scale * (log_x_recon - cf_log_x_recon)
             log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
             log_new_x_recon = log_new_x_recon.clamp(-70, 0)
             log_pred = torch.cat((log_new_x_recon, self.transformer.zero_vector), dim=1)
-
-            # c_mat = (log_x_recon - torch.logsumexp(log_x_recon, dim=1, keepdim=True)).clamp(-70, 0)
-            # n_mat = (cf_log_x_recon - torch.logsumexp(cf_log_x_recon, dim=1, keepdim=True)).clamp(-70, 0)
-
-            # c_mat = torch.stack(c_mat.max(dim=1), dim = 1)
-            # n_mat = torch.stack(n_mat.max(dim=1), dim = 1)
-            
-            # for n_m, c_m in zip(n_mat, c_mat):
-            #     wandb.log({
-            #         'logit_max log(no condition)' : pd.DataFrame(n_m.view(2*32, 32).to('cpu').numpy()),
-            #         'logit_max log(condition)' : pd.DataFrame(c_m.view(2*32, 32).to('cpu').numpy()) 
-            #     })
             return log_pred
 
         if replicate != 1:

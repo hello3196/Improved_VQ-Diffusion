@@ -223,6 +223,12 @@ class VQ_Diffusion():
         self.model.transformer.purity_temp = purity_temp
         self.model.transformer.mask_schedule_test = schedule
 
+        """
+        schedule 수정 (step, schedule = 7 ...)
+        """
+        if schedule == 7:
+            for s in range(1, len(self.model.transformer.n_sample)):
+                self.model.transformer.n_sample[s] += self.model.transformer.n_sample[s - 1]
         if infer_speed != False:
             add_string = 'r,time'+str(infer_speed)
         else:
