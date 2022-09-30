@@ -37,11 +37,8 @@ from inference_VQ_Diffusion import VQ_Diffusion
 from image_synthesis.utils.io import load_yaml_config
 
 class Token_Critic(nn.Module):
-    def __init__(self, config, path=None, save_root = None, learnable_cf = True):
+    def __init__(self, config, learnable_cf = True):
         super().__init__()
-        # model_path 추가 예정
-        self.model_path = path
-        self.save_path = save_root + 'checkpoint'
 
         config = load_yaml_config(config)
         transformer_config = config['transformer_config']
@@ -81,10 +78,10 @@ class Token_Critic(nn.Module):
         self.transformer.train()
         batch_size = len(text)
         # text -> BPE tokenizing -> CLIP emb
-        condition_token = self.prepare_condition(text)['condition_token']
-        with torch.no_grad():
+        condition_token = self.prepare_condition(text)['condition_token'] # BPE token
+        with torch.no_grad(): # condition(CLIP) -> freeze
             cond_emb = self.condition_emb(condition_token) # B x Ld x D   256*1024
-            cond_emb = cond_emb.float()
+            cond_emb = cond_emb.float() # CLIP condition
         # no text condition
         # batch['text'] = [''] * batch_size
         # cf_condition = self.prepare_condition(batch=batch)
@@ -100,24 +97,34 @@ class Token_Critic(nn.Module):
 
 
 if __name__ == '__main__':
-    Token_Critic_model = Token_Critic(config='configs/token_critic.yaml', path=None, save_root= '', learnable_cf=True)
+    Token_Critic_model = Token_Critic(config='configs/token_critic.yaml', learnable_cf=True)
     VQ_Diffusion_model = VQ_Diffusion(config='configs/coco_tune.yaml', path='OUTPUT/pretrained_model/coco_learnable.pth')
     
     # dataset setting
     data_root = "st1/dataset/coco_vq"
     data = CocoDataset(data_root=data_root, phase='train')
     batch_size = 2
-    optimizer = torch.optim.Adam(Token_Critic_model.parameters(), lr = 1e-4, betas = (0.9, 0.96))
+
+    # load from ckpt
+    # checkpoint = torch.load('tc_ckpt/epoch_0_checkpoint.ckpt')
+    # missing, unexpected = Token_Critic_model.load_state_dict(checkpoint["Model"], stric=False)
+    # print('Model missing keys:\n', missing)
+    # print('Model unexpected keys:\n', unexpected)
+
+    optimizer = torch.optim.Adam(Token_Critic_model.transformer.parameters(), lr = 1e-4, betas = (0.9, 0.96))
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size = 10, gamma = 0.9)
-    train_loss_100 = 0
+
     os.makedirs("tc_ckpt/", exist_ok=True)
+    train_loss_100 = 0
+    
     for epoch in range(100):
         print(f"epoch: {epoch}")
-        torch.save({'Model': Token_Critic_model,
+        torch.save({'Model': Token_Critic_model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'epoch': epoch,},
                     f"tc_ckpt/epoch_{epoch}_checkpoint.ckpt")
-        print()
+        print(f"{epoch} checkpoint is saved")
+
         for bb, data_i in enumerate(torch.utils.data.DataLoader(dataset=data, batch_size=batch_size, shuffle = True)):
             # data_i {"image", "text"}
             with torch.no_grad():
@@ -129,9 +136,11 @@ if __name__ == '__main__':
             # text drop 추가 예정
             _, loss = Token_Critic_model._train_loss(data_i['text'], vq_out)
             train_loss_100 += loss.item()
+
             if (bb+1) % 100 == 0:
                 print(f"train_loss(100 batch) {train_loss_100}")
                 trin_loss_100 = 0
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
