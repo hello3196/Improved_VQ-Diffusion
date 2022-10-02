@@ -21,6 +21,12 @@ from image_synthesis.distributed.launch import launch
 try:
     import nsml
     from nsml import IS_ON_NSML
+    from nsml_utils import bind_model
+    # import nsml_utils.Logger as nsml_Logger
+    data = os.path.join(nsml.DATASET_PATH[0], 'train')
+    clip_model_path = os.path.join(nsml.DATASET_PATH[1], 'train/ViT-B-32.pt')
+    diffusion_model_path = os.path.join(nsml.DATASET_PATH[2], 'train/ithq_learnable.pth')
+    vqvae_model_path = os.path.join(nsml.DATASET_PATH[3], 'train/ithq_vqvae.pth')
 except ImportError:
     nsml = None
     IS_ON_NSML = False
@@ -78,6 +84,9 @@ def get_args():
 
     parser.add_argument('--debug', action='store_true', default=False,
                         help='set as debug mode')
+
+    parser.add_argument('--only_val', type=bool, default=False,
+                        help='measure metric w/o training')
     # args for modify config
     parser.add_argument(
         "opts",
@@ -87,6 +96,7 @@ def get_args():
     )  
 
     args = parser.parse_args()
+    print(args)
     args.cwd = os.path.abspath(os.path.dirname(__file__))
 
     if args.resume_name is not None:
@@ -112,6 +122,8 @@ def get_args():
 
 def main():
     args = get_args()
+    args.load_path = diffusion_model_path
+    bind_model()
 
     if args.seed is not None or args.cudnn_deterministic:
         seed_everything(args.seed, args.cudnn_deterministic)
@@ -170,7 +182,11 @@ def main_worker(local_rank, args):
         solver.resume()
     # with torch.autograd.set_detect_anomaly(True):
     #     solver.train()
-    solver.train()
+
+    if args.only_val:
+        solver.validate()
+    else:
+        solver.train()
 
 if __name__ == '__main__':
     main()

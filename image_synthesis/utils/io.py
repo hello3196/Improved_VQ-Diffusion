@@ -4,8 +4,12 @@ import torch
 import json
 
 def load_yaml_config(path):
-    with open(path) as f:
-        config = yaml.full_load(f)
+    try:
+        with open(path) as f:
+            config = yaml.full_load(f)
+    except:
+        with open(path["target"]) as f:
+            config = yaml.full_load(f)
     return config
 
 

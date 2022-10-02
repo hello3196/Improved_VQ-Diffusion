@@ -29,6 +29,9 @@ except:
     print('Warning: import torch.amp failed, so no amp will be used!')
     AMP = False
 
+import scipy.linalg
+import numpy as np
+from get_FID import FeatureStats, get_feature_detector
 
 STEP_WITH_LOSS_SCHEDULERS = (ReduceLROnPlateauWithWarmup, ReduceLROnPlateau)
 
@@ -226,6 +229,34 @@ class Solver(object):
             self.ema.modify_to_train()
         
         self.logger.log_info('Sample done, time: {:.2f}'.format(time.time() - tic))
+
+    def fid_step(self, batch):
+        detector_url = 'https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/inception-2015-12-05.pt'
+        detector = get_feature_detector(url=detector_url, device=self.device, num_gpus=self.args.world_size, rank=self.args.local_rank)
+        if self.debug == False: 
+            for k, v in batch.items():
+                if torch.is_tensor(v):
+                    batch[k] = v.cuda()
+        else:
+            batch = batch[0].cuda()
+
+        input = {
+            'batch': batch,
+            'step': self.last_iter,
+            }
+
+        with torch.no_grad():
+            if self.args.amp:
+                with autocast():
+                    features_real = detector(batch["image"].to(self.device), return_features=True)
+                    output = self.model.generate_content_for_metric(**input)
+                    features_gen = detector(output.to(self.device), return_features=True)
+            else:
+                features_real = detector(batch["image"].to(self.device), return_features=True)
+                output = self.model.generate_content_for_metric(**input)
+                features_gen = detector(output.to(self.device), return_features=True)
+            
+        return features_real, features_gen
 
     def step(self, batch, phase='train'):
         loss = {}
@@ -534,8 +565,50 @@ class Solver(object):
                         self.logger.add_scalar(tag='val/{}/{}'.format(loss_n, k), scalar_value=float(loss_dict[k]), global_step=self.last_epoch)
                 self.logger.log_info(info)
 
+    def validate_epoch_fid(self):
+        if 'validation_loader' not in self.dataloader:
+            val = False
+        else:
+            if isinstance(self.validation_epochs, int):
+                val = (self.last_epoch + 1) % self.validation_epochs == 0
+            else:
+                val = (self.last_epoch + 1) in self.validation_epochs        
+        
+        if val:
+            if self.args.distributed:
+                self.dataloader['validation_loader'].sampler.set_epoch(self.last_epoch)
+
+            self.model.eval()
+            overall_loss = None
+            epoch_start = time.time()
+            itr_start = time.time()
+            itr = -1
+
+            stats_real = FeatureStats(max_items=num_items, capture_mean_cov=True)
+            stats_gen = FeatureStats(max_items=num_items, capture_mean_cov=True)
+
+            for itr, batch in enumerate(self.dataloader['validation_loader']):
+                data_time = time.time() - itr_start
+                step_start = time.time()
+                features_real, features_gen = self.fid_step(batch)
+                stats_real.append_torch(features_real, num_gpus=self.args.world_size, rank=self.args.local_rank)
+                stats_gen.append_torch(features_gen, num_gpus=self.args.world_size, rank=self.args.local_rank)
+                
+
+                itr_start = time.time()
+            mu_real, sigma_real = stats_real.get_mean_cov()
+            mu_gen, sigma_gen = stats_gen.get_mean_cov()
+            
+            if args.local_rank !=0:
+                return float ('nan')
+            
+            m = np.square(mu_gen - mu_real).sum()
+            s, _ = scipy.linalg.sqrtm(np.dot(sigma_gen, sigma_real), disp=False) # pylint: disable=no-member
+            fid = np.real(m + np.trace(sigma_gen + sigma_real - s * 2))
+            return float(fid)
+
     def validate(self):
-        self.validation_epoch()
+        self.validation_epoch_fid()
 
     def train(self):
         start_epoch = self.last_epoch + 1

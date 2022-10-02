@@ -262,9 +262,9 @@ class VQ_Diffusion():
         detector_kwargs = dict(return_features=True)
 
         mu_real, sigma_real = get_FID.get_real_FID(data_root=data_root, detector_url=detector_url, detector_kwargs=detector_kwargs,
-                            device=device, batch_size=batch_size, rel_lo=0, rel_hi=0, capture_mean_cov=True).get_mean_cov
+                            device=device, batch_size=batch_size, rel_lo=0, rel_hi=0, capture_mean_cov=True).get_mean_cov()
         mu_gen, sigma_gen = get_FID.get_gen_FID(data_root=data_root, model=self.model, detector_url=detector_url, detector_kwargs=detector_kwargs,
-                            device=device, batch_size=batch_size, sample_type=sample_type, rel_lo=0, rel_hi=1, capture_mean_cov=True).get_mean_cov
+                            device=device, batch_size=batch_size, sample_type=sample_type, rel_lo=0, rel_hi=1, capture_mean_cov=True).get_mean_cov()
 
         m = np.square(mu_gen - mu_real).sum()
         s, _ = scipy.linalg.sqrtm(np.dot(sigma_gen, sigma_real), disp=False) # pylint: disable=no-member
