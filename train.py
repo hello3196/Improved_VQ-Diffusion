@@ -183,6 +183,7 @@ def main_worker(local_rank, args):
     # with torch.autograd.set_detect_anomaly(True):
     #     solver.train()
 
+    model.transformer.mask_schedule_test = 1
     if args.only_val:
         solver.validate()
     else:

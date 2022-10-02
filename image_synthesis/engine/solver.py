@@ -249,11 +249,11 @@ class Solver(object):
             if self.args.amp:
                 with autocast():
                     features_real = detector(batch["image"].to(self.device), return_features=True)
-                    output = self.model.generate_content_for_metric(**input)
+                    output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
                     features_gen = detector(output.to(self.device), return_features=True)
             else:
                 features_real = detector(batch["image"].to(self.device), return_features=True)
-                output = self.model.generate_content_for_metric(**input)
+                output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
                 features_gen = detector(output.to(self.device), return_features=True)
             
         return features_real, features_gen
@@ -413,20 +413,21 @@ class Solver(object):
                     model_dict.update(temp_state_dict)
                     self.ema.load_state_dict(model_dict)
 
-            if 'clip_grad_norm' in state_dict and self.clip_grad_norm is not None:
+            if 'clip_grad_norm' in state_dict and self.clip_grad_norm is not None and state_dict['clip_grad_norm'] is not None:
                 self.clip_grad_norm.load_state_dict(state_dict['clip_grad_norm'])
 
             # handle optimizer and scheduler
-            for op_sc_n, op_sc in state_dict['optimizer_and_scheduler'].items():
-                for k in op_sc:
-                    if k in ['optimizer', 'scheduler']:
-                        for kk in op_sc[k]:
-                            if kk == 'module' and load_optimizer_and_scheduler:
-                                self.optimizer_and_scheduler[op_sc_n][k][kk].load_state_dict(op_sc[k][kk])
-                            elif load_others: # such as step_iteration, ...
-                                self.optimizer_and_scheduler[op_sc_n][k][kk] = op_sc[k][kk]
-                    elif load_others: # such as start_epoch, end_epoch, ....
-                        self.optimizer_and_scheduler[op_sc_n][k] = op_sc[k]
+            if state_dict['optimizer_and_scheduler'] is not None:
+                for op_sc_n, op_sc in state_dict['optimizer_and_scheduler'].items():
+                    for k in op_sc:
+                        if k in ['optimizer', 'scheduler']:
+                            for kk in op_sc[k]:
+                                if kk == 'module' and load_optimizer_and_scheduler:
+                                    self.optimizer_and_scheduler[op_sc_n][k][kk].load_state_dict(op_sc[k][kk])
+                                elif load_others: # such as step_iteration, ...
+                                    self.optimizer_and_scheduler[op_sc_n][k][kk] = op_sc[k][kk]
+                        elif load_others: # such as start_epoch, end_epoch, ....
+                            self.optimizer_and_scheduler[op_sc_n][k] = op_sc[k]
             
             self.logger.log_info('Resume from {}'.format(path))
     
@@ -584,6 +585,7 @@ class Solver(object):
             itr_start = time.time()
             itr = -1
 
+            num_items = len(self.dataloader['validation_loader'])
             stats_real = FeatureStats(max_items=num_items, capture_mean_cov=True)
             stats_gen = FeatureStats(max_items=num_items, capture_mean_cov=True)
 
@@ -593,7 +595,7 @@ class Solver(object):
                 features_real, features_gen = self.fid_step(batch)
                 stats_real.append_torch(features_real, num_gpus=self.args.world_size, rank=self.args.local_rank)
                 stats_gen.append_torch(features_gen, num_gpus=self.args.world_size, rank=self.args.local_rank)
-                
+                #progress?                
 
                 itr_start = time.time()
             mu_real, sigma_real = stats_real.get_mean_cov()
@@ -608,7 +610,7 @@ class Solver(object):
             return float(fid)
 
     def validate(self):
-        self.validation_epoch_fid()
+        self.validate_epoch_fid()
 
     def train(self):
         start_epoch = self.last_epoch + 1
