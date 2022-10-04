@@ -230,34 +230,6 @@ class Solver(object):
         
         self.logger.log_info('Sample done, time: {:.2f}'.format(time.time() - tic))
 
-    def fid_step(self, batch):
-        detector_url = 'https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/inception-2015-12-05.pt'
-        detector = get_feature_detector(url=detector_url, device=self.device, num_gpus=self.args.world_size, rank=self.args.local_rank)
-        if self.debug == False: 
-            for k, v in batch.items():
-                if torch.is_tensor(v):
-                    batch[k] = v.cuda()
-        else:
-            batch = batch[0].cuda()
-
-        input = {
-            'batch': batch,
-            'step': self.last_iter,
-            }
-
-        with torch.no_grad():
-            if self.args.amp:
-                with autocast():
-                    features_real = detector(batch["image"].to(self.device), return_features=True)
-                    output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
-                    features_gen = detector(output.to(self.device), return_features=True)
-            else:
-                features_real = detector(batch["image"].to(self.device), return_features=True)
-                output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
-                features_gen = detector(output.to(self.device), return_features=True)
-            
-        return features_real, features_gen
-
     def step(self, batch, phase='train'):
         loss = {}
         if self.debug == False: 
@@ -579,27 +551,13 @@ class Solver(object):
             if self.args.distributed:
                 self.dataloader['validation_loader'].sampler.set_epoch(self.last_epoch)
 
+            progress = ProgressMonitor()
+
             self.model.eval()
-            overall_loss = None
-            epoch_start = time.time()
-            itr_start = time.time()
-            itr = -1
+            detector_url = 'https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/inception-2015-12-05.pt'
 
-            num_items = len(self.dataloader['validation_loader'])
-            stats_real = FeatureStats(max_items=num_items, capture_mean_cov=True)
-            stats_gen = FeatureStats(max_items=num_items, capture_mean_cov=True)
-
-            for itr, batch in enumerate(self.dataloader['validation_loader']):
-                data_time = time.time() - itr_start
-                step_start = time.time()
-                features_real, features_gen = self.fid_step(batch)
-                stats_real.append_torch(features_real, num_gpus=self.args.world_size, rank=self.args.local_rank)
-                stats_gen.append_torch(features_gen, num_gpus=self.args.world_size, rank=self.args.local_rank)
-                #progress?                
-
-                itr_start = time.time()
-            mu_real, sigma_real = stats_real.get_mean_cov()
-            mu_gen, sigma_gen = stats_gen.get_mean_cov()
+            mu_real, sigma_real = self.get_real_feat(detector_url, progress).get_mean_cov()
+            mu_gen, sigma_gen = self.get_gen_feat(detector_url, progress).get_mean_cov()
             
             if args.local_rank !=0:
                 return float ('nan')
@@ -607,7 +565,66 @@ class Solver(object):
             m = np.square(mu_gen - mu_real).sum()
             s, _ = scipy.linalg.sqrtm(np.dot(sigma_gen, sigma_real), disp=False) # pylint: disable=no-member
             fid = np.real(m + np.trace(sigma_gen + sigma_real - s * 2))
+            print("FID : ", float(fid))
             return float(fid)
+
+    def get_real_feat(self, detector_url, progress):
+        num_items = len(self.dataloader['validation_loader'])
+        stats = FeatureStats(max_items=num_items, capture_mean_cov=True)
+        progress = progress.sub(tag='dataset features', num_items=num_items, rel_lo=0, rel_hi=0)
+        detector = get_feature_detector(url=detector_url, device=self.device, num_gpus=self.args.world_size,
+                                        rank=self.args.local_rank, verbose=progress.verbose)
+        for itr, batch in enumerate(self.dataloader['validation_loader']):
+            if itr%250 == 0:
+                print("[ ", itr, " / ", num_items, " ]")
+            if self.debug == False: 
+                for k, v in batch.items():
+                    if torch.is_tensor(v):
+                        batch[k] = v.cuda()
+            else:
+                batch = batch[0].cuda()
+
+            with torch.no_grad():
+                if self.args.amp:
+                    with autocast():
+                        features_real = detector(batch["image"].to(self.device), return_features=True)
+                else:
+                    features_real = detector(batch["image"].to(self.device), return_features=True)
+            stats.append_torch(features_real, num_gpus=self.args.world_size, rank=self.args.local_rank)
+            progress.update(stats.num_items)
+            del batch
+        return stats
+
+    def get_gen_feat(self, detector_url, progress):
+        num_items = len(self.dataloader['validation_loader'])
+        stats = FeatureStats(max_items=num_items, capture_mean_cov=True)
+        progress = progress.sub(tag='generator features', num_items=num_items, rel_lo=0, rel_hi=1)
+        detector = get_feature_detector(url=detector_url, device=self.device, num_gpus=self.args.world_size,
+                                        rank=self.args.local_rank, verbose=progress.verbose)
+        for itr, batch in enumerate(self.dataloader['validation_loader']):
+            if itr%250 == 0:
+                print("[ ", itr, " / ", num_items, " ]")
+            if self.debug == False: 
+                for k, v in batch.items():
+                    if torch.is_tensor(v):
+                        batch[k] = v.cuda()
+            else:
+                batch = batch[0].cuda()
+
+            with torch.no_grad():
+                if self.args.amp:
+                    with autocast():
+                        output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
+                        features_gen = detector(output.to(self.device), return_features=True)
+                else:
+                    output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
+                    features_gen = detector(output.to(self.device), return_features=True)
+            stats.append_torch(features_gen, num_gpus=self.args.world_size, rank=self.args.local_rank)
+            progress.update(stats.num_items)
+            del batch
+        return stats
+
+
 
     def validate(self):
         self.validate_epoch_fid()
@@ -622,3 +639,45 @@ class Solver(object):
             self.save(force=True)
             self.validate_epoch()
 
+class ProgressMonitor:
+    def __init__(self, tag=None, num_items=None, flush_interval=1000, verbose=False, progress_fn=None, pfn_lo=0, pfn_hi=1000, pfn_total=1000):
+        self.tag = tag
+        self.num_items = num_items
+        self.verbose = verbose
+        self.flush_interval = flush_interval
+        self.progress_fn = progress_fn
+        self.pfn_lo = pfn_lo
+        self.pfn_hi = pfn_hi
+        self.pfn_total = pfn_total
+        self.start_time = time.time()
+        self.batch_time = self.start_time
+        self.batch_items = 0
+        if self.progress_fn is not None:
+            self.progress_fn(self.pfn_lo, self.pfn_total)
+
+    def update(self, cur_items):
+        assert (self.num_items is None) or (cur_items <= self.num_items)
+        if (cur_items < self.batch_items + self.flush_interval) and (self.num_items is None or cur_items < self.num_items):
+            return
+        cur_time = time.time()
+        total_time = cur_time - self.start_time
+        time_per_item = (cur_time - self.batch_time) / max(cur_items - self.batch_items, 1)
+        if (self.verbose) and (self.tag is not None):
+            print(f'{self.tag:<19s} items {cur_items:<7d} time {dnnlib.util.format_time(total_time):<12s} ms/item {time_per_item*1e3:.2f}')
+        self.batch_time = cur_time
+        self.batch_items = cur_items
+
+        if (self.progress_fn is not None) and (self.num_items is not None):
+            self.progress_fn(self.pfn_lo + (self.pfn_hi - self.pfn_lo) * (cur_items / self.num_items), self.pfn_total)
+
+    def sub(self, tag=None, num_items=None, flush_interval=1000, rel_lo=0, rel_hi=1):
+        return ProgressMonitor(
+            tag             = tag,
+            num_items       = num_items,
+            flush_interval  = flush_interval,
+            verbose         = self.verbose,
+            progress_fn     = self.progress_fn,
+            pfn_lo          = self.pfn_lo + (self.pfn_hi - self.pfn_lo) * rel_lo,
+            pfn_hi          = self.pfn_lo + (self.pfn_hi - self.pfn_lo) * rel_hi,
+            pfn_total       = self.pfn_total,
+        )

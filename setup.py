@@ -26,6 +26,7 @@ setup(
     version='1.0',
     description='',
     install_requires=[
+        "torch==1.7.1",
         "wandb",
         "visdom",
         "wget"

@@ -121,7 +121,7 @@ dataloader:
   # data_root: data
   data_root: /mnt/blob/datasets/MSCOCO_Caption
   batch_size: 4
-  num_workers: 4
+  num_workers: 2
   train_datasets: # a list of configures, so we can combine several schedulers
     - target: image_synthesis.data.mscoco_dataset.CocoDataset
       params:
