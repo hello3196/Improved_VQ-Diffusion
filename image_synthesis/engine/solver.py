@@ -341,8 +341,11 @@ class Solver(object):
                 state_dict['optimizer_and_scheduler'] = optimizer_and_scheduler
             
                 if save:
-                    save_path = os.path.join(self.ckpt_dir, '{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter))
-                    torch.save(state_dict, save_path)
+                    if IS_ON_NSML:
+                        save_path = nsml.save('{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter), state_dict)
+                    else:
+                        save_path = os.path.join(self.ckpt_dir, '{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter))
+                        torch.save(state_dict, save_path)
                     self.logger.log_info('saved in {}'.format(save_path))    
                 
                 # save with the last name

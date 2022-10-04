@@ -72,8 +72,10 @@ def bind_model():
         
         return {'model': model, 'epoch': epoch, 'model_name': model_name, 'parameter': model_parameters}
 
-    def save(filename, **kwargs):
-        return 0
+    def save(filename, state_dict, **kwargs):
+        save_path = os.path.join(filename, 'model.pkl')
+        torch.save(state_dict, save_path)
+        return save_path
 
     def infer(input):
         stats_metrics = dict()
