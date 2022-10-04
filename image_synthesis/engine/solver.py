@@ -559,7 +559,7 @@ class Solver(object):
             mu_real, sigma_real = self.get_real_feat(detector_url, progress).get_mean_cov()
             mu_gen, sigma_gen = self.get_gen_feat(detector_url, progress).get_mean_cov()
             
-            if args.local_rank !=0:
+            if self.args.local_rank !=0:
                 return float ('nan')
             
             m = np.square(mu_gen - mu_real).sum()
@@ -601,6 +601,7 @@ class Solver(object):
         progress = progress.sub(tag='generator features', num_items=num_items, rel_lo=0, rel_hi=1)
         detector = get_feature_detector(url=detector_url, device=self.device, num_gpus=self.args.world_size,
                                         rank=self.args.local_rank, verbose=progress.verbose)
+
         for itr, batch in enumerate(self.dataloader['validation_loader']):
             if itr%250 == 0:
                 print("[ ", itr, " / ", num_items, " ]")

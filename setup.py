@@ -29,6 +29,7 @@ setup(
         "torch==1.7.1",
         "wandb",
         "visdom",
-        "wget"
+        "wget",
+        "pytorch-lightning==1.0.8"
         ]
 )
