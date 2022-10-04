@@ -94,8 +94,15 @@ class Token_Critic(nn.Module):
         loss = criterion(out, target)
 
         return out, loss
+    
+    @torch.no_grad()
+    def inference_score(self, input, cond_emb):
+        self.transformer.eval()
+        out = self.transformer(input=input['recon_token'], cond_emb=cond_emb, t=input['t']) # b, 1, 1024 logit
+        out = out.squeeze() # b, 1024
 
-
+        return out
+    
 if __name__ == '__main__':
     Token_Critic_model = Token_Critic(config='configs/token_critic.yaml', learnable_cf=True)
     VQ_Diffusion_model = VQ_Diffusion(config='configs/coco_tune.yaml', path='OUTPUT/pretrained_model/coco_learnable.pth')
@@ -107,7 +114,7 @@ if __name__ == '__main__':
 
     # load from ckpt
     # checkpoint = torch.load('tc_ckpt/epoch_0_checkpoint.ckpt')
-    # missing, unexpected = Token_Critic_model.load_state_dict(checkpoint["Model"], stric=False)
+    # missing, unexpected = Token_Critic_model.load_state_dict(checkpoint["Model"], strict=False)
     # print('Model missing keys:\n', missing)
     # print('Model unexpected keys:\n', unexpected)
 
