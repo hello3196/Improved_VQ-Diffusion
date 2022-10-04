@@ -11,7 +11,9 @@ import argparse
 import numpy as np
 import torchvision
 from PIL import Image
-
+import seaborn as sns
+import pandas as pd
+import matplotlib.pyplot as plt
 
 import scipy.linalg
 import get_FID
@@ -59,6 +61,7 @@ class VQ_Critic(nn.Module):
         self.Token_Critic = Token_Critic(config=tc_config, learnable_cf=tc_learnable_cf)
         self.tc_learnable = tc_learnable_cf
         self.device = "cuda"
+        self.num_classes = self.VQ_Diffusion.model.transformer.num_classes
 
     def load_tc(self, ckpt_path):
         checkpoint = torch.load(ckpt_path)
@@ -87,8 +90,37 @@ class VQ_Critic(nn.Module):
             cond_['condition_' + k] = v
         return cond_
 
+    def score_matrix_log(self, score): # score (b, 1024)
+        for i in range(score.shape[0]):
+            score_2d = score[i].view(32, 32)
+            df = pd.DataFrame(score_2d.to('cpu').numpy())
+            fig, ax = plt.subplots(figsize = (20, 20))
+            sns.heatmap(df, annot=df, cbar=False, vmin=0, vmax=1, cmap="Greys")
+            wandb.log({f"{i}_score_matrix": wandb.Image(fig)})
+            plt.close()
+
+    def recon_image_log(self, out_idx): # out_idx (b, 1024)
+        content = self.VQ_Diffusion.model.content_codec.decode(out_idx)
+        content = content.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8)
+        for b in range(content.shape[0]):
+            cnt = b
+            save_base_name = '{}'.format(str(cnt).zfill(6))
+            im = Image.fromarray(content[b])
+            wandb.log({f"{b:02d}_step recon" : wandb.Image(im)})
+
+    def mask_token_log(self, out_idx): # out2_idx (b, 1024 with mask token)
+        for i in range(out_idx.shape[0]):
+            out_idx_2d = out_idx[i].view(32, 32)
+            df = pd.DataFrame(out_idx_2d.to('cpu').numpy())
+            an = df.replace(self.num_classes - 1, 'mask').astype('str')
+            df = df.replace(self.num_classes - 1, -(self.num_classes - 1)) # for cmap
+            fig, ax = plt.subplots(figsize = (20, 20))
+            sns.heatmap(df, annot=an, cbar=False, fmt = '', vmin = -(self.num_classes - 1), vmax = self.num_classes - 1)
+            wandb.log({f"{i}_content": wandb.Image(fig)})   
+            plt.close() 
+
     @torch.no_grad()
-    def inference_generate_sample_with_condition(self, text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16):
+    def inference_generate_sample_with_condition(self, text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log="s,t,r"):
         """
         step: 16, 50, 100
 
@@ -99,6 +131,7 @@ class VQ_Critic(nn.Module):
             1) VQ: 1 step reconstruction
             2) TC: Masking based on score
         """
+        log_set = wandb_log.split(',')
         save_root = 'RESULT'
         os.makedirs(save_root, exist_ok=True)
         str_cond = str(text) + '_' + str(step)
@@ -110,9 +143,11 @@ class VQ_Critic(nn.Module):
             n_sample = [64] * 16
             time_list = [index for index in range(100 -5, -1, -6)]
         elif step == 50:
-            n_sample = [index for index in range(100 -1, -1, -2)]
+            n_sample = [10] + [21, 20] * 24 + [30]
+            time_list = [index for index in range(100 -1, -1, -2)]
         else: # 100
-            n_sample = [index for index in range(100 -1, -1, -1)]
+            n_sample = [1, 10] + [11, 10, 10] * 32 + [11, 11]
+            time_list = [index for index in range(100 -1, -1, -1)]
 
         n_mask = []
         for s in range(1, step):
@@ -126,6 +161,15 @@ class VQ_Critic(nn.Module):
         self.VQ_Diffusion.model.learnable_cf = self.VQ_Diffusion.model.transformer.learnable_cf = True
 
         cf_cond_emb = self.VQ_Diffusion.model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
+        if self.tc_learnable: 
+            tc_cf_cond_emb = self.Token_Critic.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
+        else:
+            none_text = [''] * batch_size
+            condition_token = self.prepare_condition(none_text) # BPE token
+            with torch.no_grad(): # condition(CLIP) -> freeze
+                tc_cond_emb = self.VQ_Diffusion.model.transformer.condition_emb(condition_token['condition_token']) # B x Ld x D   256*1024
+                tc_cf_cond_emb = tc_cond_emb.float() # CLIP condition
+
         def cf_predict_start(log_x_t, cond_emb, t):
             log_x_recon = self.VQ_Diffusion.model.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
             if abs(self.VQ_Diffusion.model.guidance_scale - 1) < 1e-3:
@@ -151,7 +195,7 @@ class VQ_Critic(nn.Module):
 
         # initialize: All mask 
         device = self.device
-        zero_logits = torch.zeros((batch_size, self.VQ_Diffusion.model.transformer.num_classes-1, self.VQ_Diffusion.model.transformer.shape),device=device)
+        zero_logits = torch.zeros((batch_size, self.num_classes-1, self.VQ_Diffusion.model.transformer.shape),device=device)
         one_logits = torch.ones((batch_size, 1, self.VQ_Diffusion.model.transformer.shape),device=device)
         mask_logits = torch.cat((zero_logits, one_logits), dim=1)
         log_z = torch.log(mask_logits)
@@ -164,26 +208,40 @@ class VQ_Critic(nn.Module):
                 _, log_x_recon = self.VQ_Diffusion.model.transformer.p_pred(log_z, cond_emb, t)
                 out = self.VQ_Diffusion.model.transformer.log_sample_categorical(log_x_recon) # recon -> sample -> x_0
                 out_idx = log_onehot_to_index(out) # b, 1024
-                out2_idx = torch.full_like(out_idx, self.VQ_Diffusion.model.transformer.num_classes-1).to(out_idx.device) # all mask index list
+                out2_idx = torch.full_like(out_idx, self.num_classes-1).to(out_idx.device) # all mask index list
 
                 # 2) TC: Masking based on score
                 t_1 = torch.full((batch_size,), time_list[i+1], device=device, dtype=torch.long) # t-1 step
                 score = self.Token_Critic.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=cond_emb) # b, 1024
+                if tc_guidance not None:
+                    cf_score = self.Token_Critic.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=tc_cf_cond_emb)
+                    score = cf_score + tc_guidance * (score - cf_score)
+                score = 1 - score # (1 - score) = unchanged confidence score (because score means changed confidence)
 
                 # score += self.n_t(diffusion_index) # n(t) for randomness
                 # score *= 2 # weight sampling
 
-                score = 1 - score # (1 - score) = unchanged confidence score (because score means changed confidence)
                 for ii in range(batch_size):
                     sel = torch.multinomial(score[ii], n)
                     out2_idx[ii][sel] = out_idx[ii][sel]
-                log_z = index_to_log_onehot(out2_idx, self.VQ_Diffusion.model.transformer.num_classes)
-            
+                log_z = index_to_log_onehot(out2_idx, self.num_classes)
+
+                # log
+                if 's' in log_set:
+                    self.score_matrix_log(score)
+                if 'r' in log_set:
+                    self.recon_image_log(out_idx)
+                if 't' in log_set:
+                    self.mask_token_log(out2_idx)
+
             # Final step
             t = torch.full((batch_size,), time_list[-1], device=device, dtype=torch.long)
             _, log_x_recon = self.VQ_Diffusion.model.transformer.p_pred(log_z, cond_emb, t)
             out = self.VQ_Diffusion.model.transformer.log_sample_categorical(log_x_recon) # recon -> sample -> x_0
             content_token = log_onehot_to_index(out) # b, 1024
+
+            if 't' in log_set:
+                self.mask_token_log(out2_idx)
         
         # decoding token
         content = self.VQ_Diffusion.model.content_codec.decode(content_token)
@@ -194,6 +252,7 @@ class VQ_Critic(nn.Module):
             im = Image.fromarray(content[b])
             save_path = os.path.join(save_root_, save_base_name+'.png')
             im.save(save_path)
+            wandb.log({"result" : wandb.Image(im)})
 
 
 
@@ -201,6 +260,6 @@ class VQ_Critic(nn.Module):
 if __name__ == '__main__':
     model = VQ_Critic(vq='coco', tc_config='configs/token_critic.yaml', tc_learnable_cf=True)
     # model.load_tc('tc_ckpt/epoch_0_checkpoint.ckpt')
-
-    model.inference_generate_sample_with_condition(text="teddy bear playing in the pool", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=64)
+    wandb.init(project='TC test', name = 'teddybear_16')
+    model.inference_generate_sample_with_condition(text="teddy bear playing in the pool", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t')
     
