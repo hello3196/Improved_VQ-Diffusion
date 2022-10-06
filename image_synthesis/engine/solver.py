@@ -33,6 +33,7 @@ import scipy.linalg
 import numpy as np
 from get_FID import FeatureStats, get_feature_detector
 
+
 STEP_WITH_LOSS_SCHEDULERS = (ReduceLROnPlateauWithWarmup, ReduceLROnPlateau)
 
 
@@ -405,6 +406,8 @@ class Solver(object):
                             self.optimizer_and_scheduler[op_sc_n][k] = op_sc[k]
             
             self.logger.log_info('Resume from {}'.format(path))
+        else:
+            ImportError
     
     def train_epoch(self):
         self.model.train()

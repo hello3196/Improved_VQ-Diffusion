@@ -1,6 +1,5 @@
 import os
 import visdom
-import wget
 from image_synthesis.utils.io import load_yaml_config
 from image_synthesis.modeling.build import build_model
 from image_synthesis.utils.misc import get_model_parameters_info

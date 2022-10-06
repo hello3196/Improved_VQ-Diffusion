@@ -25,8 +25,12 @@ try:
     # import nsml_utils.Logger as nsml_Logger
     data = os.path.join(nsml.DATASET_PATH[0], 'train')
     clip_model_path = os.path.join(nsml.DATASET_PATH[1], 'train/ViT-B-32.pt')
-    diffusion_model_path = os.path.join(nsml.DATASET_PATH[2], 'train/ithq_learnable.pth')
-    vqvae_model_path = os.path.join(nsml.DATASET_PATH[3], 'train/ithq_vqvae.pth')
+    diffusion_model_path = os.path.join(nsml.DATASET_PATH[2], 'train')
+    diffusion_model_name = os.listdir(diffusion_model_path)[0]
+    diffusion_model_path = os.path.join(diffusion_model_path, diffusion_model_name)
+    vqvae_model_path = os.path.join(nsml.DATASET_PATH[3], 'train')
+    vqvae_model_name = os.listdir(vqvae_model_path)[0]
+    vqvae_model_path = os.path.join(vqvae_model_path, vqvae_model_name)
 except ImportError:
     nsml = None
     IS_ON_NSML = False

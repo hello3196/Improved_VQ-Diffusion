@@ -221,7 +221,9 @@ class TamingGumbelVQVAE(BaseCodec):
             mapping_path='./help_folder/statistics/taming_vqvae_2887.pt',
         ):
         super().__init__()
-        ckpt_path = os.path.join(nsml.DATASET_PATH[3], 'train/ithq_vqvae.pth')
+        ckpt_path = os.path.join(nsml.DATASET_PATH[3], 'train/') #+ nsml.DATASET_PATH[3].split('/')[-1] + '.pth')
+        ckpt_name = os.listdir(ckpt_path)[0]
+        ckpt_path = os.path.join(ckpt_path, ckpt_name)
         model = self.LoadModel(config_path, ckpt_path)
 
         self.enc = Encoder(model.encoder, model.quant_conv, model.quantize)
