@@ -1,4 +1,4 @@
 target: image_synthesis.data.utils.image_preprocessor.DalleTransformerPreprocessor   # ImageNet
 params:
   size: 256
-  phase: val
+  phase: train

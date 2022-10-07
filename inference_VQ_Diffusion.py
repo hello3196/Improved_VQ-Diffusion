@@ -6,6 +6,7 @@
 # ------------------------------------------
 
 import os
+import glob
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
 
@@ -16,6 +17,7 @@ import argparse
 import numpy as np
 import torchvision
 from PIL import Image
+
 
 import scipy.linalg
 import get_FID
@@ -51,13 +53,14 @@ class VQ_Diffusion():
             self.info = self.get_nsml_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
         else:
             self.info = self.get_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
-        self.model = self.info['model']
-        self.epoch = self.info['epoch']
-        self.model_name = self.info['model_name']
-        self.model = self.model.cuda()
-        self.model.eval()
-        for param in self.model.parameters(): 
-            param.requires_grad=False
+            self.model = self.info['model']
+            self.epoch = self.info['epoch']
+            self.model_name = self.info['model_name']
+            self.model = self.model.cuda()
+            self.model.eval()
+            for param in self.model.parameters(): 
+                param.requires_grad=False
+
 
     def get_nsml_model(self, ema, model_path, config_path, imagenet_cf):
         resume_info = model_path.split(',')
@@ -236,7 +239,6 @@ class VQ_Diffusion():
             if abs(self.model.guidance_scale - 1) < 1e-3:
                 return torch.cat((log_x_recon, self.model.transformer.zero_vector), dim=1)
             cf_log_x_recon = self.model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
-       
             log_new_x_recon = cf_log_x_recon + self.model.guidance_scale * (log_x_recon - cf_log_x_recon)
             log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
             log_new_x_recon = log_new_x_recon.clamp(-70, 0)
@@ -616,8 +618,9 @@ class VQ_Diffusion():
 
 
 if __name__ == '__main__':
-    VQ_Diffusion_model = VQ_Diffusion(config='configs/ithq.yaml', path=diffusion_model_path)
-    # VQ_Diffusion_model = VQ_Diffusion(config='configs/ithq.yaml', path='OUTPUT/pretrained_model/ithq_learnable.pth')
+    VQ_Diffusion_model = VQ_Diffusion(config='configs/coco_tune.yaml', path='OUTPUT/pretrained_model/coco_learnable.pth')
+
+    # VQ_Diffusion_model = VQ_Diffusion(config='configs/ithq.yaml', path=diffusion_model_path)
 
     # Inference VQ-Diffusion
     # VQ_Diffusion_model.inference_generate_sample_with_condition("teddy bear playing in the pool", truncation_rate=0.86, save_root="RESULT", batch_size=4)
@@ -631,7 +634,7 @@ if __name__ == '__main__':
     # VQ_Diffusion_model.inference_generate_sample_with_condition("a long exposure photo of waterfall", truncation_rate=1.0, save_root="RESULT", batch_size=4, guidance_scale=5.0)
 
     # Inference Improved VQ-Diffusion for metric
-    VQ_Diffusion_model.inference_generate_sample_for_fid(truncation_rate=1.0, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=5)
+   
 
     # Inference Improved VQ-Diffusion with fast/high-quality inference
     # VQ_Diffusion_model.inference_generate_sample_with_condition("a long exposure photo of waterfall", truncation_rate=0.86, save_root="RESULT", batch_size=4, infer_speed=0.5) # high-quality inference, 0.5x inference speed

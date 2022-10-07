@@ -2,7 +2,7 @@ transformer_config:
   target: image_synthesis.modeling.transformers.token_critic.Text2Logit
   params:
     attn_type: 'selfcross'
-    n_layer: 16 #19
+    n_layer: 12 #19
     condition_seq_len: 77    ###### 77 for clip and 256 for dalle
     content_seq_len: 1024  # 32 x 32
     content_spatial_size: [32, 32]
