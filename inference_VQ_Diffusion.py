@@ -49,32 +49,28 @@ class VQ_Diffusion():
         if IS_ON_NSML:
             bind_model()
             self.nsml_img_logger = Logger()
+            
         if resume_nsml_model:
-            self.info = self.get_nsml_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
-        else:
-            self.info = self.get_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
-            self.model = self.info['model']
-            self.epoch = self.info['epoch']
-            self.model_name = self.info['model_name']
-            self.model = self.model.cuda()
-            self.model.eval()
-            for param in self.model.parameters(): 
-                param.requires_grad=False
+            resume_info = model_path.split(',')
+            checkpoint_num = resume_info[0]
+            session_name = resume_info[1]
+            print(f'Resuming from checkpoint {checkpoint_num}, session {session_name}')
 
-
-    def get_nsml_model(self, ema, model_path, config_path, imagenet_cf):
-        resume_info = model_path.split(',')
-        checkpoint_num = resume_info[0]
-        session_name = resume_info[1]
-        print(f'Resuming from checkpoint {checkpoint_num}, session {session_name}')
-        return nsml.load(checkpoint=checkpoint_num, session=session_name, map_location="cpu")
+        self.info = self.get_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
+        self.model = self.info['model']
+        self.epoch = self.info['epoch']
+        self.model_name = self.info['model_name']
+        self.model = self.model.cuda()
+        self.model.eval()
+        for param in self.model.parameters(): 
+            param.requires_grad=False
 
     def get_model(self, ema, model_path, config_path, imagenet_cf):
         # if 'OUTPUT' in model_path: # pretrained model
         #     model_name = model_path.split(os.path.sep)[-3]
         # else:
         #     model_name = os.path.basename(config_path).replace('.yaml', '')
-        model_name = model_path
+        model_name = os.path.basename(config_path).replace('.yaml', '')
 
         config = load_yaml_config(config_path)
 
@@ -86,7 +82,7 @@ class VQ_Diffusion():
         
         print(model_parameters)
         if os.path.exists(model_path):
-            ckpt = torch.load(model_path, map_location="cpu")
+            ckpt = nsml.load(model_path, map_location="cpu")
         else:
             print("Model path: {} does not exist.".format(model_path))
             exit(0)

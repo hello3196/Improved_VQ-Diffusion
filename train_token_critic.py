@@ -230,7 +230,6 @@ def get_args():
 
 def main():
     args = get_args()
-    args.load_path = diffusion_model_path
     bind_model()
 
     if args.seed is not None or args.cudnn_deterministic:
@@ -269,7 +268,7 @@ def main_worker(local_rank, args):
     logger.save_config(config)
 
     # get model 
-    VQ_Diffusion_model = VQ_Diffusion(config='configs/coco_tune.yaml', path='OUTPUT/pretrained_model/coco_learnable.pth')
+    VQ_Diffusion_model = VQ_Diffusion(config='configs/coco_tune.yaml', path=diffusion_model_path)
     Token_Critic_model = Token_Critic(config=config, learnable_cf=True)
     wandb.init(project='TC train', name = 'layer12_scratch_coco_train')
     # print(model)
