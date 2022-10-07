@@ -82,7 +82,10 @@ class VQ_Diffusion():
         
         print(model_parameters)
         if os.path.exists(model_path):
-            ckpt = nsml.load(model_path, map_location="cpu")
+            if resume_nsml_model:
+                ckpt = nsml.load(model_path, map_location="cpu")
+            else:
+                ckpt = torch.load(model_path, map_location="cpu")
         else:
             print("Model path: {} does not exist.".format(model_path))
             exit(0)

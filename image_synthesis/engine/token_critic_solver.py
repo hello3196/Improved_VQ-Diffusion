@@ -37,7 +37,7 @@ from get_FID import FeatureStats, get_feature_detector
 STEP_WITH_LOSS_SCHEDULERS = (ReduceLROnPlateauWithWarmup, ReduceLROnPlateau)
 
 
-class Solver(object):
+class Token_Critic_Solver(object):
     def __init__(self, config, args, token_critic_model, diffusion_model, dataloader, logger):
         self.config = config
         self.args = args
@@ -82,8 +82,8 @@ class Solver(object):
             raise NotImplementedError('Unknown type of adjust lr {}!'.format(adjust_lr))
         self.logger.log_info('Get lr {} from base lr {} with {}'.format(self.lr, base_lr, adjust_lr))
 
-        if hasattr(model, 'get_optimizer_and_scheduler') and callable(getattr(model, 'get_optimizer_and_scheduler')):
-            optimizer_and_scheduler = model.get_optimizer_and_scheduler(config['solver']['optimizers_and_schedulers'])
+        if hasattr(token_critic_model, 'get_optimizer_and_scheduler') and callable(getattr(token_critic_model, 'get_optimizer_and_scheduler')):
+            optimizer_and_scheduler = token_critic_model.get_optimizer_and_scheduler(config['solver']['optimizers_and_schedulers'])
         else:
             optimizer_and_scheduler = self._get_optimizer_and_scheduler(config['solver']['optimizers_and_schedulers'])
 

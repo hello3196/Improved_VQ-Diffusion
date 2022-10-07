@@ -12,11 +12,14 @@ import time
 import torch
 from image_synthesis.modeling.build import build_model
 from image_synthesis.data.build import build_dataloader
-from image_synthesis.utils.misc import seed_everything, merge_opts_to_config, modify_config_for_debug
+from image_synthesis.utils.misc import get_model_parameters_info, instantiate_from_config, seed_everything, merge_opts_to_config, modify_config_for_debug
 from image_synthesis.utils.io import load_yaml_config
 from image_synthesis.engine.logger import Logger
 from image_synthesis.engine.token_critic_solver import Token_Critic_Solver
 from image_synthesis.distributed.launch import launch
+from torch import nn
+from inference_VQ_Diffusion import VQ_Diffusion
+import wandb
 
 try:
     import nsml
@@ -46,7 +49,6 @@ class Token_Critic(nn.Module):
     def __init__(self, config, learnable_cf = False):
         super().__init__()
 
-        config = load_yaml_config(config)
         transformer_config = config['transformer_config']
         condition_codec_config = config['condition_codec_config']
         condition_emb_config = config['condition_emb_config']
@@ -270,7 +272,7 @@ def main_worker(local_rank, args):
     # get model 
     VQ_Diffusion_model = VQ_Diffusion(config='configs/coco_tune.yaml', path=diffusion_model_path)
     Token_Critic_model = Token_Critic(config=config, learnable_cf=True)
-    wandb.init(project='TC train', name = 'layer12_scratch_coco_train')
+    # wandb.init(project='TC train', name = 'layer12_scratch_coco_train')
     # print(model)
     if args.sync_bn:
         VQ_Diffusion_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(VQ_Diffusion_model)
