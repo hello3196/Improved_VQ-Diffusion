@@ -14,6 +14,8 @@ from image_synthesis.modeling.codecs.base_codec import BaseCodec
 from einops import rearrange
 import math
 
+import nsml
+
 class Encoder(nn.Module):
     def __init__(self, encoder, quant_conv, quantize):
         super().__init__()
@@ -219,7 +221,9 @@ class TamingGumbelVQVAE(BaseCodec):
             mapping_path='./help_folder/statistics/taming_vqvae_2887.pt',
         ):
         super().__init__()
-        
+        ckpt_path = os.path.join(nsml.DATASET_PATH[3], 'train/') #+ nsml.DATASET_PATH[3].split('/')[-1] + '.pth')
+        ckpt_name = os.listdir(ckpt_path)[0]
+        ckpt_path = os.path.join(ckpt_path, ckpt_name)
         model = self.LoadModel(config_path, ckpt_path)
 
         self.enc = Encoder(model.encoder, model.quant_conv, model.quantize)
@@ -242,7 +246,9 @@ class TamingGumbelVQVAE(BaseCodec):
     def LoadModel(self, config_path, ckpt_path):
         config = OmegaConf.load(config_path)
         model = GumbelVQ(**config.model.params)
-        sd = torch.load(ckpt_path, map_location="cpu")["state_dict"]
+        sd = torch.load(ckpt_path, map_location="cpu")
+        # print(sd)
+        # sd = torch.load(ckpt_path, map_location="cpu")["state_dict"]
         model.load_state_dict(sd, strict=False)
         return model
 

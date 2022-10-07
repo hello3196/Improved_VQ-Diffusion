@@ -32,17 +32,25 @@ try:
     import nsml
     from nsml import IS_ON_NSML
     from nsml_utils import bind_model, Logger
+    data = os.path.join(nsml.DATASET_PATH[0], 'train')
+    clip_model_path = os.path.join(nsml.DATASET_PATH[1], 'train/ViT-B-32.pt')
+    diffusion_model_path = os.path.join(nsml.DATASET_PATH[2], 'train/ithq_learnable.pth')
+    vqvae_model_path = os.path.join(nsml.DATASET_PATH[3], 'train/ithq_vqvae.pth')
 except ImportError:
     nsml = None
     IS_ON_NSML = False
 
 import wandb
+
+resume_nsml_model = False
+
 class VQ_Diffusion():
     def __init__(self, config, path, imagenet_cf=False):
         if IS_ON_NSML:
             bind_model()
             self.nsml_img_logger = Logger()
-            # self.info = self.get_nsml_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
+        if resume_nsml_model:
+            self.info = self.get_nsml_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
         else:
             self.info = self.get_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
             self.model = self.info['model']
@@ -53,19 +61,20 @@ class VQ_Diffusion():
             for param in self.model.parameters(): 
                 param.requires_grad=False
 
+
     def get_nsml_model(self, ema, model_path, config_path, imagenet_cf):
         resume_info = model_path.split(',')
         checkpoint_num = resume_info[0]
         session_name = resume_info[1]
         print(f'Resuming from checkpoint {checkpoint_num}, session {session_name}')
         return nsml.load(checkpoint=checkpoint_num, session=session_name, map_location="cpu")
-        
 
     def get_model(self, ema, model_path, config_path, imagenet_cf):
-        if 'OUTPUT' in model_path: # pretrained model
-            model_name = model_path.split(os.path.sep)[-3]
-        else:
-            model_name = os.path.basename(config_path).replace('.yaml', '')
+        # if 'OUTPUT' in model_path: # pretrained model
+        #     model_name = model_path.split(os.path.sep)[-3]
+        # else:
+        #     model_name = os.path.basename(config_path).replace('.yaml', '')
+        model_name = model_path
 
         config = load_yaml_config(config_path)
 
@@ -217,14 +226,6 @@ class VQ_Diffusion():
         self.model.transformer.purity_temp = purity_temp
         self.model.transformer.mask_schedule_test = schedule
 
-        """
-        schedule 수정 (step, schedule = 7 ...)
-        """
-        self.model.transformer.n_sample = [10] + [21, 20] * 24 + [30] # T=50
-        if schedule == 7:
-            for s in range(1, len(self.model.transformer.n_sample)):
-                self.model.transformer.n_sample[s] += self.model.transformer.n_sample[s - 1]
-
         if infer_speed != False:
             add_string = 'r,time'+str(infer_speed)
         else:
@@ -238,7 +239,6 @@ class VQ_Diffusion():
             if abs(self.model.guidance_scale - 1) < 1e-3:
                 return torch.cat((log_x_recon, self.model.transformer.zero_vector), dim=1)
             cf_log_x_recon = self.model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
-     
             log_new_x_recon = cf_log_x_recon + self.model.guidance_scale * (log_x_recon - cf_log_x_recon)
             log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
             log_new_x_recon = log_new_x_recon.clamp(-70, 0)
@@ -255,7 +255,7 @@ class VQ_Diffusion():
             self.model.truncation_forward = True
 
         if IS_ON_NSML is True:
-            data_root = os.path.join(nsml.DATASET_PATH, 'train')
+            data_root = data
         else:
             data_root = "st1/dataset/coco_vq"
 
@@ -305,25 +305,11 @@ class VQ_Diffusion():
             if abs(self.model.guidance_scale - 1) < 1e-3:
                 return torch.cat((log_x_recon, self.model.transformer.zero_vector), dim=1)
             cf_log_x_recon = self.model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
-
-            # print(f"[{t}]no condition: ", cf_log_x_recon)
-            # print(f"[{t}]condition: ", log_x_recon)            
+     
             log_new_x_recon = cf_log_x_recon + self.model.guidance_scale * (log_x_recon - cf_log_x_recon)
             log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
             log_new_x_recon = log_new_x_recon.clamp(-70, 0)
             log_pred = torch.cat((log_new_x_recon, self.model.transformer.zero_vector), dim=1)
-
-            # c_mat = (log_x_recon - torch.logsumexp(log_x_recon, dim=1, keepdim=True)).clamp(-70, 0)
-            # n_mat = (cf_log_x_recon - torch.logsumexp(cf_log_x_recon, dim=1, keepdim=True)).clamp(-70, 0)
-
-            # c_mat = torch.stack(c_mat.max(dim=1), dim = 1)
-            # n_mat = torch.stack(n_mat.max(dim=1), dim = 1)
-            
-            # for n_m, c_m in zip(n_mat, c_mat):
-            #     wandb.log({
-            #         'logit_max log(no condition)' : pd.DataFrame(n_m.view(2*32, 32).to('cpu').numpy()),
-            #         'logit_max log(condition)' : pd.DataFrame(c_m.view(2*32, 32).to('cpu').numpy()) 
-            #     })
             return log_pred
 
         sample_type = "top"+str(truncation_rate)+add_string
@@ -456,6 +442,7 @@ class VQ_Diffusion():
                 if IS_ON_NSML:
                     self.nsml_img_logger.images_summary(save_base_name, im)
 
+
     def recon_test(self, img_root):
         save_root = os.path.join(img_root, 'recon')
         os.makedirs(save_root, exist_ok=True)
@@ -481,6 +468,7 @@ class VQ_Diffusion():
             save_path = os.path.join(save_root, save_base_name+'.png')
             im = Image.fromarray(content[b])
             im.save(save_path)
+
 
     def mask_recon_test(self, text, truncation_rate, img_root, batch_size, noise_t, recon_step, guidance_scale=1.0, prior_rule=0, prior_weight=0): 
         """
@@ -609,7 +597,7 @@ class VQ_Diffusion():
             im = Image.fromarray(content[b])
             im.save(save_path)
 
-    
+
     def real_mask_recon(self, data_i, truncation_rate, guidance_scale=5.0): 
         """
         data_i = {'image': b, c, h, w, 'text': b, ~}
@@ -631,10 +619,8 @@ class VQ_Diffusion():
 
 if __name__ == '__main__':
     VQ_Diffusion_model = VQ_Diffusion(config='configs/coco_tune.yaml', path='OUTPUT/pretrained_model/coco_learnable.pth')
-    wandb.init(project='FID_50test', name = 'schedule_7_coco')
-    VQ_Diffusion_model.inference_generate_sample_for_fid(truncation_rate=0.86, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=7)
-    # VQ_Diffusion_model.recon_test('/content/drive/MyDrive/VQ/Improved_VQ-Diffusion/blur_test')
-    # VQ_Diffusion_model = VQ_Diffusion(config='configs/ithq.yaml', path='OUTPUT/pretrained_model/ithq_learnable.pth')
+
+    # VQ_Diffusion_model = VQ_Diffusion(config='configs/ithq.yaml', path=diffusion_model_path)
 
     # Inference VQ-Diffusion
     # VQ_Diffusion_model.inference_generate_sample_with_condition("teddy bear playing in the pool", truncation_rate=0.86, save_root="RESULT", batch_size=4)

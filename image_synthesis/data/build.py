@@ -56,10 +56,10 @@ def build_dataloader(config, args=None, return_dataset=False):
                                              batch_size=dataset_cfg['batch_size'], 
                                              shuffle=False, #(val_sampler is None),
                                              num_workers=num_workers, 
-                                             pin_memory=True, 
+                                             pin_memory=False, 
                                              sampler=val_sampler, 
                                              drop_last=True,
-                                             persistent_workers=True)
+                                             persistent_workers=False)
 
     dataload_info = {
         'train_loader': train_loader,

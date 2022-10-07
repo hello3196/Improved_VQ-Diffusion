@@ -355,24 +355,11 @@ class DALLE(nn.Module):
                 return torch.cat((log_x_recon, self.transformer.zero_vector), dim=1)
             cf_log_x_recon = self.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
 
-            # print(f"[{t}]no condition: ", cf_log_x_recon)
-            # print(f"[{t}]condition: ", log_x_recon)            
+        
             log_new_x_recon = cf_log_x_recon + self.guidance_scale * (log_x_recon - cf_log_x_recon)
             log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
             log_new_x_recon = log_new_x_recon.clamp(-70, 0)
             log_pred = torch.cat((log_new_x_recon, self.transformer.zero_vector), dim=1)
-
-            # c_mat = (log_x_recon - torch.logsumexp(log_x_recon, dim=1, keepdim=True)).clamp(-70, 0)
-            # n_mat = (cf_log_x_recon - torch.logsumexp(cf_log_x_recon, dim=1, keepdim=True)).clamp(-70, 0)
-
-            # c_mat = torch.stack(c_mat.max(dim=1), dim = 1)
-            # n_mat = torch.stack(n_mat.max(dim=1), dim = 1)
-            
-            # for n_m, c_m in zip(n_mat, c_mat):
-            #     wandb.log({
-            #         'logit_max log(no condition)' : pd.DataFrame(n_m.view(2*32, 32).to('cpu').numpy()),
-            #         'logit_max log(condition)' : pd.DataFrame(c_m.view(2*32, 32).to('cpu').numpy()) 
-            #     })
             return log_pred
 
         if replicate != 1:

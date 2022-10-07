@@ -12,6 +12,8 @@ from tqdm import tqdm
 from .model import build_model
 from .simple_tokenizer import SimpleTokenizer as _Tokenizer
 
+import nsml
+
 __all__ = ["available_models", "load", "tokenize"]
 _tokenizer = _Tokenizer()
 
@@ -27,7 +29,7 @@ def _download(url: str, root: str = os.path.expanduser("~/.cache/image-synthesis
 
     expected_sha256 = url.split("/")[-2]
     # download_target = os.path.join(root, filename)
-    download_target = "OUTPUT/pretrained_model/ViT-B-32.pt"
+    download_target = os.path.join(nsml.DATASET_PATH[1],"train/ViT-B-32.pt")
 
     if os.path.exists(download_target) and not os.path.isfile(download_target):
         raise RuntimeError(f"{download_target} exists and is not a regular file")
@@ -93,7 +95,7 @@ def load(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_a
     """
     if name in _MODELS:
         # model_path = _download(_MODELS[name])
-        model_path = "OUTPUT/pretrained_model/ViT-B-32.pt"
+        model_path = os.path.join(nsml.DATASET_PATH[1],"train/ViT-B-32.pt")
     elif os.path.isfile(name):
         model_path = name
     else:

@@ -26,8 +26,11 @@ setup(
     version='1.0',
     description='',
     install_requires=[
+        # "torch==1.7.1",
+        "pytorch-lightning==1.0.8",
         "wandb",
-        "visdom",
-        "wget"
+        # "clean-fid",
+        # "torchmetrics==0.6.0",
+        "visdom"
         ]
 )

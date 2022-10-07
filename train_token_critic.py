@@ -24,6 +24,7 @@ import image_synthesis.modeling.modules.clip.clip as clip
 from image_synthesis.data.mscoco_dataset import CocoDataset 
 from image_synthesis.engine.lr_scheduler import ReduceLROnPlateauWithWarmup
 
+
 try:
     import nsml
     from nsml import IS_ON_NSML
@@ -41,6 +42,7 @@ class Token_Critic(nn.Module):
     def __init__(self, config, learnable_cf = False):
         super().__init__()
 
+
         config = load_yaml_config(config)
         transformer_config = config['transformer_config']
         condition_codec_config = config['condition_codec_config']
@@ -50,9 +52,11 @@ class Token_Critic(nn.Module):
         transformer_config['params']['content_emb_config'] = content_emb_config
         transformer_config['params']['diffusion_step'] = 100
         
+
         self.learnable_cf = learnable_cf
         if self.learnable_cf:
             self.empty_text_embed = torch.nn.Parameter(torch.randn(size=(77, 512), requires_grad=False, dtype=torch.float64)).cuda()
+
         self.transformer = instantiate_from_config(transformer_config).cuda() # Token critic transformer
         self.condition_emb = instantiate_from_config(condition_emb_config).cuda() # CLIP Text embedding
         self.condition_codec = instantiate_from_config(condition_codec_config).cuda() # BPE Text tokenizer
@@ -172,6 +176,7 @@ if __name__ == '__main__':
         train_loss = 0
         train_loss_1000 = 0
         for bb, data_i in enumerate(data_loader):
+
             # data_i {"image", "text"}
             with torch.no_grad():
                 vq_out = VQ_Diffusion_model.real_mask_recon(
@@ -181,6 +186,7 @@ if __name__ == '__main__':
                 ) # {'t': b , 'changed': (b, 1024), 'recon_token': (b, 1024)} in cuda
             # text drop 추가 예정
             _, loss = Token_Critic_model._train_loss(data_i['text'], vq_out)
+
             train_loss += loss.item()
             train_loss_1000 += loss.item()
             if (bb+1) % 1000 == 0:
@@ -209,6 +215,7 @@ if __name__ == '__main__':
                     'epoch': epoch,},
                     f"tc_ckpt/epoch_{epoch}_checkpoint_scratch_layer_12.ckpt")
         print(f"{epoch} checkpoint is saved")
+
 
 
 

@@ -29,6 +29,10 @@ except:
     print('Warning: import torch.amp failed, so no amp will be used!')
     AMP = False
 
+import scipy.linalg
+import numpy as np
+from get_FID import FeatureStats, get_feature_detector
+
 
 STEP_WITH_LOSS_SCHEDULERS = (ReduceLROnPlateauWithWarmup, ReduceLROnPlateau)
 
@@ -338,8 +342,11 @@ class Solver(object):
                 state_dict['optimizer_and_scheduler'] = optimizer_and_scheduler
             
                 if save:
-                    save_path = os.path.join(self.ckpt_dir, '{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter))
-                    torch.save(state_dict, save_path)
+                    if IS_ON_NSML:
+                        save_path = nsml.save('{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter), state_dict)
+                    else:
+                        save_path = os.path.join(self.ckpt_dir, '{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter))
+                        torch.save(state_dict, save_path)
                     self.logger.log_info('saved in {}'.format(save_path))    
                 
                 # save with the last name
@@ -382,22 +389,25 @@ class Solver(object):
                     model_dict.update(temp_state_dict)
                     self.ema.load_state_dict(model_dict)
 
-            if 'clip_grad_norm' in state_dict and self.clip_grad_norm is not None:
+            if 'clip_grad_norm' in state_dict and self.clip_grad_norm is not None and state_dict['clip_grad_norm'] is not None:
                 self.clip_grad_norm.load_state_dict(state_dict['clip_grad_norm'])
 
             # handle optimizer and scheduler
-            for op_sc_n, op_sc in state_dict['optimizer_and_scheduler'].items():
-                for k in op_sc:
-                    if k in ['optimizer', 'scheduler']:
-                        for kk in op_sc[k]:
-                            if kk == 'module' and load_optimizer_and_scheduler:
-                                self.optimizer_and_scheduler[op_sc_n][k][kk].load_state_dict(op_sc[k][kk])
-                            elif load_others: # such as step_iteration, ...
-                                self.optimizer_and_scheduler[op_sc_n][k][kk] = op_sc[k][kk]
-                    elif load_others: # such as start_epoch, end_epoch, ....
-                        self.optimizer_and_scheduler[op_sc_n][k] = op_sc[k]
+            if state_dict['optimizer_and_scheduler'] is not None:
+                for op_sc_n, op_sc in state_dict['optimizer_and_scheduler'].items():
+                    for k in op_sc:
+                        if k in ['optimizer', 'scheduler']:
+                            for kk in op_sc[k]:
+                                if kk == 'module' and load_optimizer_and_scheduler:
+                                    self.optimizer_and_scheduler[op_sc_n][k][kk].load_state_dict(op_sc[k][kk])
+                                elif load_others: # such as step_iteration, ...
+                                    self.optimizer_and_scheduler[op_sc_n][k][kk] = op_sc[k][kk]
+                        elif load_others: # such as start_epoch, end_epoch, ....
+                            self.optimizer_and_scheduler[op_sc_n][k] = op_sc[k]
             
             self.logger.log_info('Resume from {}'.format(path))
+        else:
+            ImportError
     
     def train_epoch(self):
         self.model.train()
@@ -534,8 +544,97 @@ class Solver(object):
                         self.logger.add_scalar(tag='val/{}/{}'.format(loss_n, k), scalar_value=float(loss_dict[k]), global_step=self.last_epoch)
                 self.logger.log_info(info)
 
+    def validate_epoch_fid(self):
+        if 'validation_loader' not in self.dataloader:
+            val = False
+        else:
+            if isinstance(self.validation_epochs, int):
+                val = (self.last_epoch + 1) % self.validation_epochs == 0
+            else:
+                val = (self.last_epoch + 1) in self.validation_epochs        
+        
+        if val:
+            if self.args.distributed:
+                self.dataloader['validation_loader'].sampler.set_epoch(self.last_epoch)
+
+            progress = ProgressMonitor()
+
+            self.model.eval()
+            detector_url = 'https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/inception-2015-12-05.pt'
+
+            mu_real, sigma_real = self.get_real_feat(detector_url, progress).get_mean_cov()
+            mu_gen, sigma_gen = self.get_gen_feat(detector_url, progress).get_mean_cov()
+            
+            if self.args.local_rank !=0:
+                return float ('nan')
+            
+            m = np.square(mu_gen - mu_real).sum()
+            s, _ = scipy.linalg.sqrtm(np.dot(sigma_gen, sigma_real), disp=False) # pylint: disable=no-member
+            fid = np.real(m + np.trace(sigma_gen + sigma_real - s * 2))
+            print("FID : ", float(fid))
+            return float(fid)
+
+    def get_real_feat(self, detector_url, progress):
+        num_items = len(self.dataloader['validation_loader'])
+        stats = FeatureStats(max_items=num_items, capture_mean_cov=True)
+        progress = progress.sub(tag='dataset features', num_items=num_items, rel_lo=0, rel_hi=0)
+        detector = get_feature_detector(url=detector_url, device=self.device, num_gpus=self.args.world_size,
+                                        rank=self.args.local_rank, verbose=progress.verbose)
+        for itr, batch in enumerate(self.dataloader['validation_loader']):
+            if itr%250 == 0:
+                print("[ ", itr, " / ", num_items, " ]")
+            if self.debug == False: 
+                for k, v in batch.items():
+                    if torch.is_tensor(v):
+                        batch[k] = v.cuda()
+            else:
+                batch = batch[0].cuda()
+
+            with torch.no_grad():
+                if self.args.amp:
+                    with autocast():
+                        features_real = detector(batch["image"].to(self.device), return_features=True)
+                else:
+                    features_real = detector(batch["image"].to(self.device), return_features=True)
+            stats.append_torch(features_real, num_gpus=self.args.world_size, rank=self.args.local_rank)
+            progress.update(stats.num_items)
+            del batch
+        return stats
+
+    def get_gen_feat(self, detector_url, progress):
+        num_items = len(self.dataloader['validation_loader'])
+        stats = FeatureStats(max_items=num_items, capture_mean_cov=True)
+        progress = progress.sub(tag='generator features', num_items=num_items, rel_lo=0, rel_hi=1)
+        detector = get_feature_detector(url=detector_url, device=self.device, num_gpus=self.args.world_size,
+                                        rank=self.args.local_rank, verbose=progress.verbose)
+
+        for itr, batch in enumerate(self.dataloader['validation_loader']):
+            if itr%250 == 0:
+                print("[ ", itr, " / ", num_items, " ]")
+            if self.debug == False: 
+                for k, v in batch.items():
+                    if torch.is_tensor(v):
+                        batch[k] = v.cuda()
+            else:
+                batch = batch[0].cuda()
+
+            with torch.no_grad():
+                if self.args.amp:
+                    with autocast():
+                        output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
+                        features_gen = detector(output.to(self.device), return_features=True)
+                else:
+                    output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
+                    features_gen = detector(output.to(self.device), return_features=True)
+            stats.append_torch(features_gen, num_gpus=self.args.world_size, rank=self.args.local_rank)
+            progress.update(stats.num_items)
+            del batch
+        return stats
+
+
+
     def validate(self):
-        self.validation_epoch()
+        self.validate_epoch_fid()
 
     def train(self):
         start_epoch = self.last_epoch + 1
@@ -547,3 +646,45 @@ class Solver(object):
             self.save(force=True)
             self.validate_epoch()
 
+class ProgressMonitor:
+    def __init__(self, tag=None, num_items=None, flush_interval=1000, verbose=False, progress_fn=None, pfn_lo=0, pfn_hi=1000, pfn_total=1000):
+        self.tag = tag
+        self.num_items = num_items
+        self.verbose = verbose
+        self.flush_interval = flush_interval
+        self.progress_fn = progress_fn
+        self.pfn_lo = pfn_lo
+        self.pfn_hi = pfn_hi
+        self.pfn_total = pfn_total
+        self.start_time = time.time()
+        self.batch_time = self.start_time
+        self.batch_items = 0
+        if self.progress_fn is not None:
+            self.progress_fn(self.pfn_lo, self.pfn_total)
+
+    def update(self, cur_items):
+        assert (self.num_items is None) or (cur_items <= self.num_items)
+        if (cur_items < self.batch_items + self.flush_interval) and (self.num_items is None or cur_items < self.num_items):
+            return
+        cur_time = time.time()
+        total_time = cur_time - self.start_time
+        time_per_item = (cur_time - self.batch_time) / max(cur_items - self.batch_items, 1)
+        if (self.verbose) and (self.tag is not None):
+            print(f'{self.tag:<19s} items {cur_items:<7d} time {dnnlib.util.format_time(total_time):<12s} ms/item {time_per_item*1e3:.2f}')
+        self.batch_time = cur_time
+        self.batch_items = cur_items
+
+        if (self.progress_fn is not None) and (self.num_items is not None):
+            self.progress_fn(self.pfn_lo + (self.pfn_hi - self.pfn_lo) * (cur_items / self.num_items), self.pfn_total)
+
+    def sub(self, tag=None, num_items=None, flush_interval=1000, rel_lo=0, rel_hi=1):
+        return ProgressMonitor(
+            tag             = tag,
+            num_items       = num_items,
+            flush_interval  = flush_interval,
+            verbose         = self.verbose,
+            progress_fn     = self.progress_fn,
+            pfn_lo          = self.pfn_lo + (self.pfn_hi - self.pfn_lo) * rel_lo,
+            pfn_hi          = self.pfn_lo + (self.pfn_hi - self.pfn_lo) * rel_hi,
+            pfn_total       = self.pfn_total,
+        )

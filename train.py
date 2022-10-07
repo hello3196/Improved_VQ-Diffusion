@@ -21,6 +21,16 @@ from image_synthesis.distributed.launch import launch
 try:
     import nsml
     from nsml import IS_ON_NSML
+    from nsml_utils import bind_model
+    # import nsml_utils.Logger as nsml_Logger
+    data = os.path.join(nsml.DATASET_PATH[0], 'train')
+    clip_model_path = os.path.join(nsml.DATASET_PATH[1], 'train/ViT-B-32.pt')
+    diffusion_model_path = os.path.join(nsml.DATASET_PATH[2], 'train')
+    diffusion_model_name = os.listdir(diffusion_model_path)[0]
+    diffusion_model_path = os.path.join(diffusion_model_path, diffusion_model_name)
+    vqvae_model_path = os.path.join(nsml.DATASET_PATH[3], 'train')
+    vqvae_model_name = os.listdir(vqvae_model_path)[0]
+    vqvae_model_path = os.path.join(vqvae_model_path, vqvae_model_name)
 except ImportError:
     nsml = None
     IS_ON_NSML = False
@@ -78,6 +88,22 @@ def get_args():
 
     parser.add_argument('--debug', action='store_true', default=False,
                         help='set as debug mode')
+
+    parser.add_argument('--only_val', type=bool, default=False,
+                        help='measure metric w/o training')
+
+    # args for experiment setting
+    parser.add_argument('--batch_size', type=int, default=4, 
+                    help='batch_size (default: 4)')
+    parser.add_argument('--step', type=int, default=16, 
+                        help='decoding step (available: 16(default), 50, 100)')
+    parser.add_argument('--guidance', type=float, default=5, 
+                        help='CF-guidance scale (default: 5)')
+    parser.add_argument('--schedule', type=int, default=5, 
+                        help='5:uniform, 6:purity, 7:revoke (only when step == 16, 1~4 available)')
+    parser.add_argument('--truncation_rate', type=float, default=0.86, 
+                        help='truncation rate (default: 0.86)')
+
     # args for modify config
     parser.add_argument(
         "opts",
@@ -87,6 +113,7 @@ def get_args():
     )  
 
     args = parser.parse_args()
+    print(args)
     args.cwd = os.path.abspath(os.path.dirname(__file__))
 
     if args.resume_name is not None:
@@ -112,6 +139,8 @@ def get_args():
 
 def main():
     args = get_args()
+    args.load_path = diffusion_model_path
+    bind_model()
 
     if args.seed is not None or args.cudnn_deterministic:
         seed_everything(args.seed, args.cudnn_deterministic)
@@ -155,6 +184,7 @@ def main_worker(local_rank, args):
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
     # get dataloader
+    config['dataloader']['batch_size'] = args.batch_size
     dataloader_info = build_dataloader(config, args)
 
     # get solver
@@ -170,7 +200,39 @@ def main_worker(local_rank, args):
         solver.resume()
     # with torch.autograd.set_detect_anomaly(True):
     #     solver.train()
-    solver.train()
+
+    model.transformer.mask_schedule_test = args.schedule
+    model.guidance_scale = args.guidance
+
+    # setting for step
+    if args.step == 16:
+        model.transformer.n_sample = [64] * 16
+    elif args.step == 50:
+        model.transformer.n_sample = [10] + [21, 20] * 24 + [30] # T=50
+    if args.schedule == 7:
+        for s in range(1, len(model.transformer.n_sample)):
+            model.transformer.n_sample[s] += model.transformer.n_sample[s - 1]
+
+    # CF guidance setting
+    batch_size = args.batch_size
+    cf_cond_emb = model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
+    def cf_predict_start(log_x_t, cond_emb, t):
+        log_x_recon = model.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
+        if abs(model.guidance_scale - 1) < 1e-3:
+            return torch.cat((log_x_recon, model.transformer.zero_vector), dim=1)
+        cf_log_x_recon = model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
+        log_new_x_recon = cf_log_x_recon + model.guidance_scale * (log_x_recon - cf_log_x_recon)
+        log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
+        log_new_x_recon = log_new_x_recon.clamp(-70, 0)
+        log_pred = torch.cat((log_new_x_recon, model.transformer.zero_vector), dim=1)
+        return log_pred
+    model.transformer.cf_predict_start = model.predict_start_with_truncation(cf_predict_start, ("top"+str(args.truncation_rate)+'r'))
+    model.truncation_forward = True
+
+    if args.only_val:
+        solver.validate()
+    else:
+        solver.train()
 
 if __name__ == '__main__':
     main()
