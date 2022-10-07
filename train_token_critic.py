@@ -295,33 +295,33 @@ def main_worker(local_rank, args):
     # with torch.autograd.set_detect_anomaly(True):
     #     solver.train()
 
-    model.transformer.mask_schedule_test = args.schedule
-    model.guidance_scale = args.guidance
+    VQ_Diffusion_model.transformer.mask_schedule_test = args.schedule
+    VQ_Diffusion_model.guidance_scale = args.guidance
 
     # setting for step
     if args.step == 16:
-        model.transformer.n_sample = [64] * 16
+        VQ_Diffusion_model.transformer.n_sample = [64] * 16
     elif args.step == 50:
-        model.transformer.n_sample = [10] + [21, 20] * 24 + [30] # T=50
+        VQ_Diffusion_model.transformer.n_sample = [10] + [21, 20] * 24 + [30] # T=50
     if args.schedule == 7:
-        for s in range(1, len(model.transformer.n_sample)):
-            model.transformer.n_sample[s] += model.transformer.n_sample[s - 1]
+        for s in range(1, len(VQ_Diffusion_model.transformer.n_sample)):
+            VQ_Diffusion_model.transformer.n_sample[s] += VQ_Diffusion_model.transformer.n_sample[s - 1]
 
     # CF guidance setting
     batch_size = args.batch_size
-    cf_cond_emb = model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
+    cf_cond_emb = VQ_Diffusion_model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
     def cf_predict_start(log_x_t, cond_emb, t):
-        log_x_recon = model.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
-        if abs(model.guidance_scale - 1) < 1e-3:
-            return torch.cat((log_x_recon, model.transformer.zero_vector), dim=1)
-        cf_log_x_recon = model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
-        log_new_x_recon = cf_log_x_recon + model.guidance_scale * (log_x_recon - cf_log_x_recon)
+        log_x_recon = VQ_Diffusion_model.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
+        if abs(VQ_Diffusion_model.guidance_scale - 1) < 1e-3:
+            return torch.cat((log_x_recon, VQ_Diffusion_model.transformer.zero_vector), dim=1)
+        cf_log_x_recon = VQ_Diffusion_model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
+        log_new_x_recon = cf_log_x_recon + VQ_Diffusion_model.guidance_scale * (log_x_recon - cf_log_x_recon)
         log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
         log_new_x_recon = log_new_x_recon.clamp(-70, 0)
-        log_pred = torch.cat((log_new_x_recon, model.transformer.zero_vector), dim=1)
+        log_pred = torch.cat((log_new_x_recon, VQ_Diffusion_model.transformer.zero_vector), dim=1)
         return log_pred
-    model.transformer.cf_predict_start = model.predict_start_with_truncation(cf_predict_start, ("top"+str(args.truncation_rate)+'r'))
-    model.truncation_forward = True
+    VQ_Diffusion_model.transformer.cf_predict_start = VQ_Diffusion_model.predict_start_with_truncation(cf_predict_start, ("top"+str(args.truncation_rate)+'r'))
+    VQ_Diffusion_model.truncation_forward = True
 
     if args.only_val:
         solver.validate()
