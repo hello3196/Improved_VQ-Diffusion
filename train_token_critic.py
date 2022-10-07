@@ -60,9 +60,9 @@ class Token_Critic(nn.Module):
         self.learnable_cf = learnable_cf
         if self.learnable_cf:
             self.empty_text_embed = torch.nn.Parameter(torch.randn(size=(77, 512), requires_grad=False, dtype=torch.float64)).cuda()
-        self.transformer = instantiate_from_config(transformer_config).cuda() # Token critic transformer
-        self.condition_emb = instantiate_from_config(condition_emb_config).cuda() # CLIP Text embedding
-        self.condition_codec = instantiate_from_config(condition_codec_config).cuda() # BPE Text tokenizer
+        self.transformer = instantiate_from_config(transformer_config) # Token critic transformer
+        self.condition_emb = instantiate_from_config(condition_emb_config) # CLIP Text embedding
+        self.condition_codec = instantiate_from_config(condition_codec_config) # BPE Text tokenizer
         self.device = "cuda"
 
     @torch.no_grad()
@@ -271,7 +271,7 @@ def main_worker(local_rank, args):
 
     # get model 
     VQ_Diffusion_model = VQ_Diffusion(config='configs/coco_tune.yaml', path=diffusion_model_path)
-    Token_Critic_model = Token_Critic(config=config, learnable_cf=True)
+    Token_Critic_model = Token_Critic(config=config, learnable_cf=True).cuda()
     # wandb.init(project='TC train', name = 'layer12_scratch_coco_train')
     # print(model)
     if args.sync_bn:
@@ -297,33 +297,21 @@ def main_worker(local_rank, args):
     # with torch.autograd.set_detect_anomaly(True):
     #     solver.train()
 
-    VQ_Diffusion_model.transformer.mask_schedule_test = args.schedule
-    VQ_Diffusion_model.guidance_scale = args.guidance
-
-    # setting for step
-    if args.step == 16:
-        VQ_Diffusion_model.transformer.n_sample = [64] * 16
-    elif args.step == 50:
-        VQ_Diffusion_model.transformer.n_sample = [10] + [21, 20] * 24 + [30] # T=50
-    if args.schedule == 7:
-        for s in range(1, len(VQ_Diffusion_model.transformer.n_sample)):
-            VQ_Diffusion_model.transformer.n_sample[s] += VQ_Diffusion_model.transformer.n_sample[s - 1]
-
     # CF guidance setting
     batch_size = args.batch_size
-    cf_cond_emb = VQ_Diffusion_model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
+    cf_cond_emb = VQ_Diffusion_model.model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
     def cf_predict_start(log_x_t, cond_emb, t):
-        log_x_recon = VQ_Diffusion_model.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
-        if abs(VQ_Diffusion_model.guidance_scale - 1) < 1e-3:
-            return torch.cat((log_x_recon, VQ_Diffusion_model.transformer.zero_vector), dim=1)
-        cf_log_x_recon = VQ_Diffusion_model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
-        log_new_x_recon = cf_log_x_recon + VQ_Diffusion_model.guidance_scale * (log_x_recon - cf_log_x_recon)
+        log_x_recon = VQ_Diffusion_model.model.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
+        if abs(VQ_Diffusion_model.model.guidance_scale - 1) < 1e-3:
+            return torch.cat((log_x_recon, VQ_Diffusion_model.model.transformer.zero_vector), dim=1)
+        cf_log_x_recon = VQ_Diffusion_model.model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
+        log_new_x_recon = cf_log_x_recon + VQ_Diffusion_model.model.guidance_scale * (log_x_recon - cf_log_x_recon)
         log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
         log_new_x_recon = log_new_x_recon.clamp(-70, 0)
-        log_pred = torch.cat((log_new_x_recon, VQ_Diffusion_model.transformer.zero_vector), dim=1)
+        log_pred = torch.cat((log_new_x_recon, VQ_Diffusion_model.model.transformer.zero_vector), dim=1)
         return log_pred
-    VQ_Diffusion_model.transformer.cf_predict_start = VQ_Diffusion_model.predict_start_with_truncation(cf_predict_start, ("top"+str(args.truncation_rate)+'r'))
-    VQ_Diffusion_model.truncation_forward = True
+    VQ_Diffusion_model.model.transformer.cf_predict_start = VQ_Diffusion_model.model.predict_start_with_truncation(cf_predict_start, ("top"+str(args.truncation_rate)+'r'))
+    VQ_Diffusion_model.model.truncation_forward = True
 
     if args.only_val:
         solver.validate()

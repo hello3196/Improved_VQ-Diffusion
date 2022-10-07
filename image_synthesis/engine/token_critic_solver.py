@@ -44,7 +44,8 @@ class Token_Critic_Solver(object):
         self.model = token_critic_model 
         self.dataloader = dataloader
         self.logger = logger
-        
+        self.vq_diffusion = diffusion_model
+
         self.max_epochs = config['solver']['max_epochs']
         self.save_epochs = config['solver']['save_epochs']
         self.save_iterations = config['solver'].get('save_iterations', -1)
@@ -184,6 +185,80 @@ class Token_Critic_Solver(object):
 
     def step(self, batch, phase='train'):
         loss = {}
+        if self.debug == False: 
+            for k, v in batch.items():
+                if torch.is_tensor(v):
+                    batch[k] = v.cuda()
+        else:
+            batch = batch[0].cuda()
+
+        with torch.no_grad():
+                vq_out = self.vq_diffusion.real_mask_recon(
+                    data_i = batch,
+                    truncation_rate = 0.86,
+                    guidance_scale = 5.0
+                )
+
+        for op_sc_n, op_sc in self.optimizer_and_scheduler.items():
+            if phase == 'train':
+                # check if this optimizer and scheduler is valid in this iteration and epoch
+                if op_sc['start_iteration'] > self.last_iter:
+                    continue
+                if op_sc['end_iteration'] > 0 and op_sc['end_iteration'] <= self.last_iter:
+                    continue
+                if op_sc['start_epoch'] > self.last_epoch:
+                    continue
+                if op_sc['end_epoch'] > 0 and op_sc['end_epoch'] <= self.last_epoch:
+                    continue
+
+            input = {
+                'batch': batch,
+                'return_loss': True,
+                'step': self.last_iter,
+                }
+            if op_sc_n != 'none':
+                input['name'] = op_sc_n
+
+            if phase == 'train':
+                if self.args.amp:
+                    with autocast():
+                        _, output = self.model._train_loss(batch['text'], vq_out)
+                else:
+                    _, output = self.model._train_loss(batch['text'], vq_out)
+            else:
+                with torch.no_grad():
+                    if self.args.amp:
+                        with autocast():
+                            _, output = self.model._train_loss(batch['text'], vq_out)
+                    else:
+                        _, output = self.model._train_loss(batch['text'], vq_out)
+            output = {'loss': output, }
+            if phase == 'train':
+                if op_sc['optimizer']['step_iteration'] > 0 and (self.last_iter + 1) % op_sc['optimizer']['step_iteration'] == 0:
+                    op_sc['optimizer']['module'].zero_grad()
+                    if self.args.amp:
+                        self.scaler.scale(output['loss']).backward()
+                        if self.clip_grad_norm is not None:
+                            self.clip_grad_norm(self.model.parameters())
+                        self.scaler.step(op_sc['optimizer']['module'])
+                        self.scaler.update()
+                    else:
+                        output['loss'].backward()
+                        if self.clip_grad_norm is not None:
+                            self.clip_grad_norm(self.model.parameters())
+                        op_sc['optimizer']['module'].step()
+                    
+                if 'scheduler' in op_sc:
+                    if op_sc['scheduler']['step_iteration'] > 0 and (self.last_iter + 1) % op_sc['scheduler']['step_iteration'] == 0:
+                        if isinstance(op_sc['scheduler']['module'], STEP_WITH_LOSS_SCHEDULERS):
+                            op_sc['scheduler']['module'].step(output.get('loss'))
+                        else:
+                            op_sc['scheduler']['module'].step()
+                # update ema model
+                if self.ema is not None:
+                    self.ema.update(iteration=self.last_iter)
+
+            loss[op_sc_n] = {k: v for k, v in output.items() if ('loss' in k or 'acc' in k)}
         return loss
 
     def save(self, force=False):
@@ -351,13 +426,13 @@ class Token_Critic_Solver(object):
             itr_start = time.time()
 
             # sample
-            if self.sample_iterations > 0 and (self.last_iter + 1) % self.sample_iterations == 0:
-                # print("save model here")
-                # self.save(force=True)
-                # print("save model done")
-                self.model.eval()
-                self.sample(batch, phase='train', step_type='iteration')
-                self.model.train()
+            # if self.sample_iterations > 0 and (self.last_iter + 1) % self.sample_iterations == 0:
+            #     # print("save model here")
+            #     # self.save(force=True)
+            #     # print("save model done")
+            #     self.model.eval()
+            #     self.sample(batch, phase='train', step_type='iteration')
+            #     self.model.train()
 
         # modify here to make sure dataloader['train_iterations'] is correct
         assert itr >= 0, "The data is too less to form one iteration!"
@@ -530,7 +605,7 @@ class Token_Critic_Solver(object):
         for epoch in range(start_epoch, self.max_epochs):
             self.train_epoch()
             self.save(force=True)
-            self.validate_epoch()
+            # self.validate_epoch()
 
 class ProgressMonitor:
     def __init__(self, tag=None, num_items=None, flush_interval=1000, verbose=False, progress_fn=None, pfn_lo=0, pfn_hi=1000, pfn_total=1000):

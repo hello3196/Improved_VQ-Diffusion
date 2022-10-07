@@ -52,16 +52,16 @@ solver:
   base_lr: 3.0e-6
   adjust_lr: none # not adjust lr according to total batch_size
   max_epochs: 100
-  save_epochs: 2
+  save_epochs: 1
   validation_epochs: 5
   sample_iterations: epoch  # epoch #30000      # how many iterations to perform sampling once ?
   print_specific_things: True
 
   # config for ema
-  ema:
-    decay: 0.99
-    update_interval: 25
-    device: cpu
+  # ema:
+  #   decay: 0.99
+  #   update_interval: 25
+  #   device: cpu
 
   clip_grad_norm:
     target: image_synthesis.engine.clip_grad_norm.ClipGradNorm
