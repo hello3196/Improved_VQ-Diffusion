@@ -259,6 +259,7 @@ class DALLE(nn.Module):
         # self.train()
 
         return out
+    
 
     @torch.no_grad() # input: image_tensor, text condition(same setting), t(num)
     def real_mask_return(
@@ -463,7 +464,7 @@ class DALLE(nn.Module):
         
         if composition != False: # If condition exist -> composition
             condition2 = self.prepare_condition2(batch=batch)
-
+        
         if self.transformer.mask_schedule_test != 0:
             trans_out = self.transformer.sample_mask_schedule(condition_token=condition['condition_token'],
                                             condition_mask=condition.get('condition_mask', None),

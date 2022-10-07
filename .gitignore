@@ -1,8 +1,12 @@
-OUTPUT/pretrained_model/taming_dvae/ithq_vqvae.pth
-OUTPUT/pretrained_model/ithq_learnable.pth
-OUTPUT/pretrained_model/ViT-B-32.pt
+# OUTPUT/pretrained_model/taming_dvae/ithq_vqvae.pth
+# OUTPUT/pretrained_model/ithq_learnable.pth
+# OUTPUT/pretrained_model/ViT-B-32.pt
+OUTPUT/*
 st1/*
 wandb/*
 nohup.out
 *.pyc
 *.png
+*.jpg
+*.zip
+tc_ckpt/*

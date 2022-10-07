@@ -438,7 +438,7 @@ class DiffusionTransformer(nn.Module):
                     #     n_sample = to_sample - sampled[i]
                     # if n_sample <= 0:
                     #     continue
-                    sel = torch.multinomial(score[i], 64 * (mask_schedule_index + 1)) # importance sample with purity
+                    sel = torch.multinomial(score[i], self.n_sample[mask_schedule_index]) # importance sample with purity
                     # score_matrix = _score[i].view(32, 32)
                     # color_matrix = _score[i]
                     # for idx in sel: # 이번에 selected -> 1 (block color)
@@ -1058,6 +1058,7 @@ class DiffusionTransformer(nn.Module):
             log_z = torch.log(mask_logits)
             start_step = self.num_timesteps
             with torch.no_grad():
+
                 step_len = len(self.n_sample) # 16, 50, 100
                 if step_len == 16:
                     diffusion_list = [index for index in range(100 -5, -1, -6)]
@@ -1068,8 +1069,7 @@ class DiffusionTransformer(nn.Module):
                 for i, diffusion_index in enumerate(diffusion_list):
                     t = torch.full((batch_size,), diffusion_index, device=device, dtype=torch.long)
                     sampled = [0] * log_z.shape[0]
-                    while min(sampled) < self.n_sample[i]: 
-                        log_z, sampled = self.p_sample(log_z, cond_emb, t, sampled, self.n_sample[i], mask_schedule_index = i)     
+                    log_z, sampled = self.p_sample(log_z, cond_emb, t, sampled, self.n_sample[i], mask_schedule_index = i)     
                         # token log step by step
                         # log_z_index = log_onehot_to_index(log_z)
                         # for i in range(batch_size):

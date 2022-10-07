@@ -1,8 +1,7 @@
 import torch
 import numpy as np
 import dnnlib
-from image_synthesis.data.mscoco_dataset import CocoDataset
-from image_synthesis.data.build import build_dataloader
+
 
 _feature_detector_cache = dict()
 
@@ -99,6 +98,7 @@ def get_real_FID(data_root, detector_url, detector_kwargs, device, batch_size, r
     stats = FeatureStats(max_items=num_items, **stats_kwargs)
     detector = get_feature_detector(url=detector_url, device=device, num_gpus=1, rank=0)
     with torch.no_grad():
+
         for data_i in torch.utils.data.DataLoader(dataset=data, batch_size=batch_size, shuffle = False):
             print(1)
             image = data_i["image"].to(device)
@@ -114,14 +114,17 @@ def get_gen_FID(data_root, model, detector_url, detector_kwargs, device, batch_s
     data = CocoDataset(data_root=data_root, phase='val')
     num_items = len(data)
     stats = FeatureStats(max_items=num_items, **stats_kwargs)
+
     detector = get_feature_detector(url=detector_url, device=device, num_gpus=1, rank=0)
+
     with torch.no_grad():
-        for data_i in torch.utils.data.DataLoader(dataset=data, batch_size=batch_size, shuffle = False):
+        for bb, data_i in enumerate(torch.utils.data.DataLoader(dataset=data, batch_size=batch_size, shuffle = False)):
             out = model.generate_content_for_metric(
                 batch=data_i,
                 filter_ratio=0,
                 sample_type=sample_type
             ) # B x C x H x W
+
 
             features = detector(out.to(device), **detector_kwargs)
             stats.append_torch(features, num_gpus=1, rank=0)
