@@ -58,10 +58,10 @@ solver:
   print_specific_things: True
 
   # config for ema
-  # ema:
-  #   decay: 0.99
-  #   update_interval: 25
-  #   device: cpu
+  ema:
+    decay: 0.99
+    update_interval: 25
+    device: cpu
 
   clip_grad_norm:
     target: image_synthesis.engine.clip_grad_norm.ClipGradNorm
