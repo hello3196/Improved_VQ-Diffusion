@@ -32,9 +32,8 @@ except:
 import scipy.linalg
 import numpy as np
 from get_FID import FeatureStats, get_feature_detector
-import nsml
 from nsml import IS_ON_NSML
-
+import nsml
 
 STEP_WITH_LOSS_SCHEDULERS = (ReduceLROnPlateauWithWarmup, ReduceLROnPlateau)
 
@@ -366,7 +365,7 @@ class Solver(object):
 
         if os.path.exists(path):
             # state_dict = torch.load(path, map_location='cuda:{}'.format(self.args.local_rank))
-            state_dict = nsml.load(path, map_location='cuda:{}'.format(self.args.local_rank))
+            state_dict = nsml.load(path)
 
             if load_others:
                 self.last_epoch = state_dict['last_epoch']

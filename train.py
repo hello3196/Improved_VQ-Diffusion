@@ -140,7 +140,6 @@ def get_args():
 def main():
     args = get_args()
     args.load_path = diffusion_model_path
-    bind_model()
 
     if args.seed is not None or args.cudnn_deterministic:
         seed_everything(args.seed, args.cudnn_deterministic)
@@ -187,15 +186,17 @@ def main_worker(local_rank, args):
     config['dataloader']['batch_size'] = args.batch_size
     dataloader_info = build_dataloader(config, args)
 
+    bind_model(map_location='cuda:{}'.format(args.local_rank))
     # get solver
     solver = Solver(config=config, args=args, model=model, dataloader=dataloader_info, logger=logger)
 
-    # resume 
+    # resume
     if args.load_path is not None: # only load the model paramters
         solver.resume(path=args.load_path,
                       # load_model=True,
                       load_optimizer_and_scheduler=False,
-                      load_others=False)
+                      load_others=False
+                      )
     if args.auto_resume:
         solver.resume()
     # with torch.autograd.set_detect_anomaly(True):

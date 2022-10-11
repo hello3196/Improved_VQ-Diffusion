@@ -3,6 +3,7 @@ import visdom
 from image_synthesis.utils.io import load_yaml_config
 from image_synthesis.modeling.build import build_model
 from image_synthesis.utils.misc import get_model_parameters_info
+import torch
 
 try:
     import nsml
@@ -37,8 +38,10 @@ class Logger(object):
         pass
 
 
-def bind_model():
-    def load(filename, map_location, **kwargs):
+def bind_model(map_location=None):
+    def load(filename, **kwargs):
+        print(filename)
+        print(os.path.isfile(filename))
         ckpt = torch.load(filename, map_location=map_location)
         return ckpt
 
