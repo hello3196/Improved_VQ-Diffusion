@@ -77,7 +77,7 @@ class Token_Critic(nn.Module):
             cond_['condition_' + k] = v
         return cond_
 
-    def _train_loss(self, text, input):
+    def forward(self, text, input):
         """
         text condition(coco) (b,) 
         

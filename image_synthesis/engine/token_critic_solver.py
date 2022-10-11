@@ -222,16 +222,16 @@ class Token_Critic_Solver(object):
             if phase == 'train':
                 if self.args.amp:
                     with autocast():
-                        _, output = self.model._train_loss(batch['text'], vq_out)
+                        _, output = self.model(batch['text'], vq_out)
                 else:
-                    _, output = self.model._train_loss(batch['text'], vq_out)
+                    _, output = self.model(batch['text'], vq_out)
             else:
                 with torch.no_grad():
                     if self.args.amp:
                         with autocast():
-                            _, output = self.model._train_loss(batch['text'], vq_out)
+                            _, output = self.model(batch['text'], vq_out)
                     else:
-                        _, output = self.model._train_loss(batch['text'], vq_out)
+                        _, output = self.model(batch['text'], vq_out)
             output = {'loss': output, }
             if phase == 'train':
                 if op_sc['optimizer']['step_iteration'] > 0 and (self.last_iter + 1) % op_sc['optimizer']['step_iteration'] == 0:
