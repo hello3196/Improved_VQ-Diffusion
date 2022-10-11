@@ -365,7 +365,7 @@ class Solver(object):
 
         if os.path.exists(path):
             # state_dict = torch.load(path, map_location='cuda:{}'.format(self.args.local_rank))
-            state_dict = nsml.load(path)
+            state_dict = nsml.load(path, map_location='cuda:{}'.format(args.local_rank))
 
             if load_others:
                 self.last_epoch = state_dict['last_epoch']
