@@ -32,7 +32,7 @@ except:
 import scipy.linalg
 import numpy as np
 from get_FID import FeatureStats, get_feature_detector
-
+from nsml import IS_ON_NSML
 
 STEP_WITH_LOSS_SCHEDULERS = (ReduceLROnPlateauWithWarmup, ReduceLROnPlateau)
 

@@ -59,7 +59,7 @@ class Token_Critic(nn.Module):
         
         self.learnable_cf = learnable_cf
         if self.learnable_cf:
-            self.empty_text_embed = torch.nn.Parameter(torch.randn(size=(77, 512), requires_grad=False, dtype=torch.float64)).cuda()
+            self.empty_text_embed = torch.nn.Parameter(torch.randn(size=(77, 512), requires_grad=False, dtype=torch.float64))
         self.transformer = instantiate_from_config(transformer_config) # Token critic transformer
         self.condition_emb = instantiate_from_config(condition_emb_config) # CLIP Text embedding
         self.condition_codec = instantiate_from_config(condition_codec_config) # BPE Text tokenizer
