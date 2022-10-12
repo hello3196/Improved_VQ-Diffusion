@@ -21,7 +21,6 @@ from image_synthesis.distributed.launch import launch
 try:
     import nsml
     from nsml import IS_ON_NSML
-    from nsml_utils import bind_model
     # import nsml_utils.Logger as nsml_Logger
     data = os.path.join(nsml.DATASET_PATH[0], 'train')
     clip_model_path = os.path.join(nsml.DATASET_PATH[1], 'train/ViT-B-32.pt')
@@ -143,7 +142,6 @@ def get_args():
 def main():
     args = get_args()
     args.load_path = diffusion_model_path
-    bind_model()
 
     if args.seed is not None or args.cudnn_deterministic:
         seed_everything(args.seed, args.cudnn_deterministic)

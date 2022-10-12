@@ -34,6 +34,7 @@ import scipy.linalg
 import numpy as np
 from nsml import IS_ON_NSML
 import nsml
+from nsml_utils import bind_model
 
 STEP_WITH_LOSS_SCHEDULERS = (ReduceLROnPlateauWithWarmup, ReduceLROnPlateau)
 
@@ -320,7 +321,8 @@ class Solver(object):
             if save or force:
                 if IS_ON_NSML:
                     bind_model(self.last_epoch, self.last_iter, self.model, self.ema, self.clip_grad_norm, self.optimizer_and_scheduler)
-                    save_path = nsml.save('{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter))
+                    # save_path = nsml.save('{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter))
+                    save_path = nsml.save(self.last_epoch)
                 else:
                     state_dict = {
                         'last_epoch': self.last_epoch,
@@ -600,6 +602,7 @@ class Solver(object):
         self.logger.log_info('{}: global rank {}: start training...'.format(self.args.name, self.args.global_rank), check_primary=False)
         
         for epoch in range(start_epoch, self.max_epochs):
+            self.save(force=True)
             self.train_epoch()
             self.save(force=True)
             self.validate_epoch()
