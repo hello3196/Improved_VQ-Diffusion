@@ -30,7 +30,7 @@ setup(
         "pytorch-lightning==1.0.8",
         "wandb",
         # "clean-fid",
-        # "torchmetrics==0.6.0",
+        "torchmetrics[image]",
         "visdom"
         ]
 )
