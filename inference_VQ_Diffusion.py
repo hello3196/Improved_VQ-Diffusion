@@ -41,20 +41,8 @@ except ImportError:
 
 import wandb
 
-resume_nsml_model = False
-
 class VQ_Diffusion():
     def __init__(self, config, path, imagenet_cf=False):
-        if IS_ON_NSML:
-            bind_model()
-            self.nsml_img_logger = Logger()
-            
-        if resume_nsml_model:
-            resume_info = model_path.split(',')
-            checkpoint_num = resume_info[0]
-            session_name = resume_info[1]
-            print(f'Resuming from checkpoint {checkpoint_num}, session {session_name}')
-
         self.info = self.get_model(ema=True, model_path=path, config_path=config, imagenet_cf=imagenet_cf)
         self.model = self.info['model']
         self.epoch = self.info['epoch']
@@ -81,10 +69,7 @@ class VQ_Diffusion():
         
         print(model_parameters)
         if os.path.exists(model_path):
-            if resume_nsml_model:
-                ckpt = nsml.load(model_path, map_location="cpu")
-            else:
-                ckpt = torch.load(model_path, map_location="cpu")
+            ckpt = torch.load(model_path, map_location="cpu")
         else:
             print("Model path: {} does not exist.".format(model_path))
             exit(0)
@@ -139,11 +124,8 @@ class VQ_Diffusion():
             cnt = b
             save_base_name = '{}'.format(str(cnt).zfill(6))
             im = Image.fromarray(content[b])
-            if IS_ON_NSML:
-                self.nsml_img_logger.images_summary(save_base_name, im)
-            else:
-                save_path = os.path.join(save_root_, save_base_name+'.jpg')
-                im.save(save_path)
+            save_path = os.path.join(save_root_, save_base_name+'.jpg')
+            im.save(save_path)
             
 
     def inference_generate_sample_with_condition(self, text, truncation_rate, save_root, batch_size, infer_speed=False, guidance_scale=1.0, prior_rule=0, prior_weight=0, learnable_cf=True, text2=False, purity_temp=1., ):
@@ -191,11 +173,8 @@ class VQ_Diffusion():
             cnt = b
             save_base_name = '{}'.format(str(cnt).zfill(6))
             im = Image.fromarray(content[b])
-            if IS_ON_NSML:
-                self.nsml_img_logger.images_summary(save_base_name, im)
-            else:
-                save_path = os.path.join(save_root_, save_base_name+'.png')
-                im.save(save_path)
+            save_path = os.path.join(save_root_, save_base_name+'.png')
+            im.save(save_path)
         
         # recon log step by step
         # for i in range(9):
@@ -358,11 +337,8 @@ class VQ_Diffusion():
             save_base_name = '{}'.format(str(cnt).zfill(6))
             im = Image.fromarray(content[b])
             wandb.log({"result" : wandb.Image(im)})
-            if IS_ON_NSML:
-                self.nsml_img_logger.images_summary(save_base_name, im)
-            else:
-                save_path = os.path.join(save_root_, save_base_name+'.png')
-                im.save(save_path)
+            save_path = os.path.join(save_root_, save_base_name+'.png')
+            im.save(save_path)
 
         # recon log step by step
         for i in range(16):
@@ -372,8 +348,6 @@ class VQ_Diffusion():
                 save_base_name = str(i) + '{}'.format(str(cnt).zfill(6))
                 im = Image.fromarray(content[b])
                 wandb.log({f"{i:02d}_step recon" : wandb.Image(im)})
-                if IS_ON_NSML:
-                    self.nsml_img_logger.images_summary(save_base_name, im)
 
 
     def recon_test(self, img_root):
