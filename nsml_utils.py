@@ -41,7 +41,7 @@ class Logger(object):
 def bind_model(last_epoch, last_iter, model, ema, clip_grad_norm, optimizer_and_scheduler, local_rank, load_others, load_optimizer_and_scheduler):
     def load(filename, **kwargs):
         load_path = os.path.join(filename, 'model.pth')
-        print("loading from ", load_path)
+        print("loading from ", load_path, "...")
         state_dict = torch.load(load_path, map_location='cuda:{}'.format(local_rank))
         if load_others:
             last_epoch = state_dict['last_epoch']
@@ -84,7 +84,7 @@ def bind_model(last_epoch, last_iter, model, ema, clip_grad_norm, optimizer_and_
 
     def save(filename, **kwargs):
         save_path = os.path.join(filename, 'model.pth')
-        print("saving at ", save_path)
+        print("saving at ", save_path, "...")
         state_dict = {
                     'last_epoch': last_epoch,
                     'last_iter': last_iter,
