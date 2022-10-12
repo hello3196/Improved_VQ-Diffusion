@@ -369,6 +369,7 @@ class Solver(object):
             path = os.path.join(self.ckpt_dir, 'last.pth')
 
         if IS_ON_NSML and self.use_my_ckpt:
+            path = "ailab002/kaist_coco_vq/" + path
             bind_model(self.last_epoch, self.last_iter, self.model, self.ema, self.clip_grad_norm, self.optimizer_and_scheduler, self.args.local_rank, load_others, load_optimizer_and_scheduler)
             resume_info = path.rsplit('/', 1)
             session_name = resume_info[0]
@@ -602,7 +603,6 @@ class Solver(object):
         self.logger.log_info('{}: global rank {}: start training...'.format(self.args.name, self.args.global_rank), check_primary=False)
         
         for epoch in range(start_epoch, self.max_epochs):
-            self.save(force=True)
             self.train_epoch()
             self.save(force=True)
             self.validate_epoch()
