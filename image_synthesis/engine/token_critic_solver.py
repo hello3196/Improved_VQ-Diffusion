@@ -279,8 +279,9 @@ class Token_Critic_Solver(object):
                 
             if save or force:
                 if IS_ON_NSML:
-                    bind_model(self.last_epoch, self.last_iter, self.model, self.ema, self.clip_grad_norm, self.optimizer_and_scheduler, self.args.local_rank, None)
+                    bind_model(self.last_epoch, self.last_iter, self.model, self.ema, self.clip_grad_norm, self.optimizer_and_scheduler, self.args.local_rank, None, None)
                     nsml.save(self.last_epoch)
+                    print("saved epoch ", self.last_epoch)
                 else:
                     state_dict = {
                         'last_epoch': self.last_epoch,
@@ -327,11 +328,12 @@ class Token_Critic_Solver(object):
             path = os.path.join(self.ckpt_dir, 'last.pth')
 
         if IS_ON_NSML and self.use_my_ckpt:
-            bind_model(self.last_epoch, self.last_iter, self.model, self.ema, self.clip_grad_norm, self.optimizer_and_scheduler, self.args.local_rank, load_others)
+            bind_model(self.last_epoch, self.last_iter, self.model, self.ema, self.clip_grad_norm, self.optimizer_and_scheduler, self.args.local_rank, load_others, load_optimizer_and_scheduler)
             resume_info = path.rsplit('/', 1)
             session_name = resume_info[0]
             checkpoint_num = resume_info[1]
             nsml.load(checkpoint=checkpoint_num, session=session_name)
+            print("loaded ", resume_info)
         else:
             state_dict = torch.load(path, map_location='cuda:{}'.format(self.args.local_rank))
 
