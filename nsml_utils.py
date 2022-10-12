@@ -40,8 +40,6 @@ class Logger(object):
 
 def bind_model():
     def load(filename, map_location=None, **kwargs):
-        print(filename)
-        print(os.path.isfile(filename))
         ckpt = torch.load(filename, map_location=map_location)
         return ckpt
 
