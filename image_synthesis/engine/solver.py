@@ -318,42 +318,46 @@ class Solver(object):
                     save = (self.last_epoch + 1) in self.save_epochs
                 
             if save or force:
-                state_dict = {
-                    'last_epoch': self.last_epoch,
-                    'last_iter': self.last_iter,
-                    'model': self.model.module.state_dict() if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model.state_dict() 
-                }
-                if self.ema is not None:
-                    state_dict['ema'] = self.ema.state_dict()
-                if self.clip_grad_norm is not None:
-                    state_dict['clip_grad_norm'] = self.clip_grad_norm.state_dict()
+                if IS_ON_NSML:
+                    bind_model(self.last_epoch, self.last_iter, self.model, self.ema, self.clip_grad_norm, self.optimizer_and_scheduler)
+                    save_path = nsml.save('{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter))
+                else:
+                    state_dict = {
+                        'last_epoch': self.last_epoch,
+                        'last_iter': self.last_iter,
+                        'model': self.model.module.state_dict() if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model.state_dict() 
+                    }
+                    if self.ema is not None:
+                        state_dict['ema'] = self.ema.state_dict()
+                    if self.clip_grad_norm is not None:
+                        state_dict['clip_grad_norm'] = self.clip_grad_norm.state_dict()
 
-                # add optimizers and schedulers
-                optimizer_and_scheduler = {}
-                for op_sc_n, op_sc in self.optimizer_and_scheduler.items():
-                    state_ = {}
-                    for k in op_sc:
-                        if k in ['optimizer', 'scheduler']:
-                            op_or_sc = {kk: vv for kk, vv in op_sc[k].items() if kk != 'module'}
-                            op_or_sc['module'] = op_sc[k]['module'].state_dict()
-                            state_[k] = op_or_sc
-                        else:
-                            state_[k] = op_sc[k]
-                    optimizer_and_scheduler[op_sc_n] = state_
+                    # add optimizers and schedulers
+                    optimizer_and_scheduler = {}
+                    for op_sc_n, op_sc in self.optimizer_and_scheduler.items():
+                        state_ = {}
+                        for k in op_sc:
+                            if k in ['optimizer', 'scheduler']:
+                                op_or_sc = {kk: vv for kk, vv in op_sc[k].items() if kk != 'module'}
+                                op_or_sc['module'] = op_sc[k]['module'].state_dict()
+                                state_[k] = op_or_sc
+                            else:
+                                state_[k] = op_sc[k]
+                        optimizer_and_scheduler[op_sc_n] = state_
 
-                state_dict['optimizer_and_scheduler'] = optimizer_and_scheduler
-            
-                if save:
-                    if IS_ON_NSML:
-                        save_path = nsml.save('{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter), state_dict)
-                    else:
+                    state_dict['optimizer_and_scheduler'] = optimizer_and_scheduler
+                    if save:
                         save_path = os.path.join(self.ckpt_dir, '{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter))
                         torch.save(state_dict, save_path)
-                    self.logger.log_info('saved in {}'.format(save_path))    
+            
+                self.logger.log_info('saved in {}'.format(save_path))    
                 
                 # save with the last name
-                save_path = os.path.join(self.ckpt_dir, 'last.pth')
-                torch.save(state_dict, save_path)  
+                if IS_ON_NSML:
+                    save_path = nsml.save('last.pth')
+                else:
+                    save_path = os.path.join(self.ckpt_dir, 'last.pth')
+                    torch.save(state_dict, save_path)  
                 self.logger.log_info('saved in {}'.format(save_path))    
         
     def resume(self, 
@@ -365,50 +369,51 @@ class Solver(object):
             path = os.path.join(self.ckpt_dir, 'last.pth')
 
         if os.path.exists(path):
-            if self.use_my_ckpt:
-                state_dict = nsml.load(path, map_location='cuda:{}'.format(self.args.local_rank))
+            if IS_ON_NSML and self.use_my_ckpt:
+                bind_model(self.last_epoch, self.last_iter, self.model, self.ema, self.clip_grad_norm, self.optimizer_and_scheduler)
+                nsml.load(path, map_location='cuda:{}'.format(self.args.local_rank), load_others=load_others)
             else:
                 state_dict = torch.load(path, map_location='cuda:{}'.format(self.args.local_rank))
 
-            if load_others:
-                self.last_epoch = state_dict['last_epoch']
-                self.last_iter = state_dict['last_iter']
-            
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-                try:
-                    self.model.module.load_state_dict(state_dict['model'])
-                except:
-                    model_dict = self.model.module.state_dict()
-                    temp_state_dict = {k:v for k,v in state_dict['model'].items() if k in model_dict.keys()}
-                    model_dict.update(temp_state_dict)
-                    self.model.module.load_state_dict(model_dict)
-            else:
-                self.model.load_state_dict(state_dict['model'])
+                if load_others:
+                    self.last_epoch = state_dict['last_epoch']
+                    self.last_iter = state_dict['last_iter']
+                
+                if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
+                    try:
+                        self.model.module.load_state_dict(state_dict['model'])
+                    except:
+                        model_dict = self.model.module.state_dict()
+                        temp_state_dict = {k:v for k,v in state_dict['model'].items() if k in model_dict.keys()}
+                        model_dict.update(temp_state_dict)
+                        self.model.module.load_state_dict(model_dict)
+                else:
+                    self.model.load_state_dict(state_dict['model'])
 
-            if 'ema' in state_dict and self.ema is not None:
-                try:
-                    self.ema.load_state_dict(state_dict['ema'])
-                except:
-                    model_dict = self.ema.state_dict()
-                    temp_state_dict = {k:v for k,v in state_dict['ema'].items() if k in model_dict.keys()}
-                    model_dict.update(temp_state_dict)
-                    self.ema.load_state_dict(model_dict)
+                if 'ema' in state_dict and self.ema is not None:
+                    try:
+                        self.ema.load_state_dict(state_dict['ema'])
+                    except:
+                        model_dict = self.ema.state_dict()
+                        temp_state_dict = {k:v for k,v in state_dict['ema'].items() if k in model_dict.keys()}
+                        model_dict.update(temp_state_dict)
+                        self.ema.load_state_dict(model_dict)
 
-            if 'clip_grad_norm' in state_dict and self.clip_grad_norm is not None and state_dict['clip_grad_norm'] is not None:
-                self.clip_grad_norm.load_state_dict(state_dict['clip_grad_norm'])
+                if 'clip_grad_norm' in state_dict and self.clip_grad_norm is not None and state_dict['clip_grad_norm'] is not None:
+                    self.clip_grad_norm.load_state_dict(state_dict['clip_grad_norm'])
 
-            # handle optimizer and scheduler
-            if state_dict['optimizer_and_scheduler'] is not None:
-                for op_sc_n, op_sc in state_dict['optimizer_and_scheduler'].items():
-                    for k in op_sc:
-                        if k in ['optimizer', 'scheduler']:
-                            for kk in op_sc[k]:
-                                if kk == 'module' and load_optimizer_and_scheduler:
-                                    self.optimizer_and_scheduler[op_sc_n][k][kk].load_state_dict(op_sc[k][kk])
-                                elif load_others: # such as step_iteration, ...
-                                    self.optimizer_and_scheduler[op_sc_n][k][kk] = op_sc[k][kk]
-                        elif load_others: # such as start_epoch, end_epoch, ....
-                            self.optimizer_and_scheduler[op_sc_n][k] = op_sc[k]
+                # handle optimizer and scheduler
+                if state_dict['optimizer_and_scheduler'] is not None:
+                    for op_sc_n, op_sc in state_dict['optimizer_and_scheduler'].items():
+                        for k in op_sc:
+                            if k in ['optimizer', 'scheduler']:
+                                for kk in op_sc[k]:
+                                    if kk == 'module' and load_optimizer_and_scheduler:
+                                        self.optimizer_and_scheduler[op_sc_n][k][kk].load_state_dict(op_sc[k][kk])
+                                    elif load_others: # such as step_iteration, ...
+                                        self.optimizer_and_scheduler[op_sc_n][k][kk] = op_sc[k][kk]
+                            elif load_others: # such as start_epoch, end_epoch, ....
+                                self.optimizer_and_scheduler[op_sc_n][k] = op_sc[k]
             
             self.logger.log_info('Resume from {}'.format(path))
         else:
