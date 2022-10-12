@@ -187,6 +187,8 @@ def main_worker(local_rank, args):
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
     # get dataloader
+    if args.only_val:
+        args.batch_size = 32
     config['dataloader']['batch_size'] = args.batch_size
     dataloader_info = build_dataloader(config, args)
 

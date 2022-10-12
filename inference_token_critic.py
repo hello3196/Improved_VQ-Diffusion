@@ -16,7 +16,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 import scipy.linalg
-import get_FID
 from tqdm.auto import tqdm
 
 from image_synthesis.utils.io import load_yaml_config

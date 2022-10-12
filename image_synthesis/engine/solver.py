@@ -565,7 +565,7 @@ class Solver(object):
             self.model.eval()
 
             fid = FrechetInceptionDistance(2048).cuda()
-            num_data = len(self.dataloader['validation_loader'])
+            num_batch = len(self.dataloader['validation_loader'])
             for itr, batch in enumerate(self.dataloader['validation_loader']):
                 batch["image"] = batch["image"].to(self.device)
                 with torch.no_grad():
@@ -574,10 +574,10 @@ class Solver(object):
                             output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
                     else:
                         output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
-                
+
                 fid.update(batch["image"].type(torch.uint8), real=True)
                 fid.update(output.type(torch.uint8), real=False)
-                print("[ ", itr*output.shape[0], " / ", num_data, " ]")
+                print("[ ", itr, " / ", num_batch, " ]")
                 del batch
             fid = fid.compute()
 
