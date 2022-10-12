@@ -40,7 +40,8 @@ class Logger(object):
 
 def bind_model(last_epoch, last_iter, model, ema, clip_grad_norm, optimizer_and_scheduler, local_rank, load_others):
     def load(filename, **kwargs):
-        state_dict = torch.load(os.path.join(filename, 'model.pth'), map_location='cuda:{}'.format(local_rank))
+        load_path = os.path.join(filename, 'model.pkl')
+        state_dict = torch.load(load_path, map_location='cuda:{}'.format(local_rank))
         if load_others:
             last_epoch = state_dict['last_epoch']
             last_iter = state_dict['last_iter']
@@ -79,9 +80,10 @@ def bind_model(last_epoch, last_iter, model, ema, clip_grad_norm, optimizer_and_
                                 optimizer_and_scheduler[op_sc_n][k][kk] = op_sc[k][kk]
                     elif load_others: # such as start_epoch, end_epoch, ....
                         optimizer_and_scheduler[op_sc_n][k] = op_sc[k]
-        print("loaded from ", session, "/", checkpoint)
+        print("loaded from ", load_path)
 
     def save(filename, **kwargs):
+        print("saving ", last_epoch)
         state_dict = {
                     'last_epoch': last_epoch,
                     'last_iter': last_iter,
@@ -106,9 +108,9 @@ def bind_model(last_epoch, last_iter, model, ema, clip_grad_norm, optimizer_and_
 
         state_dict['optimizer_and_scheduler'] = op_and_sc
 
-        save_path = os.path.join(filename, 'model.pth')
+        save_path = os.path.join(filename, 'model.pkl')
         torch.save(state_dict, save_path)
-        print("saved in ", last_epoch)
+        print("saved in ", save_path)
 
     if IS_ON_NSML is True:
         nsml.bind(save=save, load=load)
