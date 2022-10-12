@@ -3,6 +3,7 @@ import visdom
 from image_synthesis.utils.io import load_yaml_config
 from image_synthesis.modeling.build import build_model
 from image_synthesis.utils.misc import get_model_parameters_info
+import torch
 
 try:
     import nsml
@@ -38,7 +39,7 @@ class Logger(object):
 
 
 def bind_model():
-    def load(filename, map_location, **kwargs):
+    def load(filename, map_location=None, **kwargs):
         ckpt = torch.load(filename, map_location=map_location)
         return ckpt
 
@@ -47,16 +48,5 @@ def bind_model():
         torch.save(state_dict, save_path)
         return save_path
 
-    def infer(input):
-        stats_metrics = dict()
-        # snapshot_pkl = os.path.join(run_dir, f'network-snapshot-{cur_nimg//1000:06d}.pkl')
-        # for metric in metrics:
-        #     result_dict = metric_main.calc_metric(metric=metric, G=named_models['G_ema'], D=named_models['D'],
-        #         dataset_kwargs=training_set_kwargs, testset_kwargs=testing_set_kwargs, num_gpus=num_gpus, rank=rank, device=device, txt_recon=True, img_recon=False, metric_only_test=metric_only_test)
-        #     if rank == 0:
-        #         metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)
-        #     stats_metrics.update(result_dict.results)
-        return stats_metrics
-
     if IS_ON_NSML is True:
-        nsml.bind(save=save, load=load, infer=infer)
+        nsml.bind(save=save, load=load)

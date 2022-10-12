@@ -92,6 +92,9 @@ def get_args():
     parser.add_argument('--only_val', type=bool, default=False,
                         help='measure metric w/o training')
 
+    parser.add_argument('--use_my_ckpt', type=bool, default=False,
+                        help='use our model loaded from nsml')
+
     # args for experiment setting
     parser.add_argument('--batch_size', type=int, default=4, 
                     help='batch_size (default: 4)')
@@ -190,12 +193,13 @@ def main_worker(local_rank, args):
     # get solver
     solver = Solver(config=config, args=args, model=model, dataloader=dataloader_info, logger=logger)
 
-    # resume 
+    # resume
     if args.load_path is not None: # only load the model paramters
         solver.resume(path=args.load_path,
                       # load_model=True,
                       load_optimizer_and_scheduler=False,
-                      load_others=False)
+                      load_others=False
+                      )
     if args.auto_resume:
         solver.resume()
     # with torch.autograd.set_detect_anomaly(True):

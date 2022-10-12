@@ -185,6 +185,9 @@ def get_args():
     parser.add_argument('--only_val', type=bool, default=False,
                         help='measure metric w/o training')
 
+    parser.add_argument('--use_my_ckpt', type=bool, default=False,
+                        help='use our model loaded from nsml')
+
     # args for experiment setting
     parser.add_argument('--batch_size', type=int, default=4, 
                     help='batch_size (default: 4)')

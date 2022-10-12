@@ -45,6 +45,7 @@ class Token_Critic_Solver(object):
         self.dataloader = dataloader
         self.logger = logger
         self.vq_diffusion = diffusion_model
+        self.use_my_ckpt = args.use_my_ckpt
 
         self.max_epochs = config['solver']['max_epochs']
         self.save_epochs = config['solver']['save_epochs']
@@ -323,8 +324,11 @@ class Token_Critic_Solver(object):
             path = os.path.join(self.ckpt_dir, 'last.pth')
 
         if os.path.exists(path):
-            # state_dict = torch.load(path, map_location='cuda:{}'.format(self.args.local_rank))
-            state_dict = nsml.load(path, map_location='cuda:{}'.format(self.args.local_rank))
+            if self.use_my_ckpt:
+                state_dict = nsml.load(path, map_location='cuda:{}'.format(self.args.local_rank))
+            else:
+                state_dict = torch.load(path, map_location='cuda:{}'.format(self.args.local_rank))
+            
 
             if load_others:
                 self.last_epoch = state_dict['last_epoch']
