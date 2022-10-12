@@ -563,7 +563,6 @@ class Token_Critic_Solver(object):
         self.logger.log_info('{}: global rank {}: start training...'.format(self.args.name, self.args.global_rank), check_primary=False)
         
         for epoch in range(start_epoch, self.max_epochs):
-            self.save(force=True)
             self.train_epoch()
             self.save(force=True)
             # self.validate_epoch()
