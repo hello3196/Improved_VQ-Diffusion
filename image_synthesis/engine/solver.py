@@ -321,8 +321,7 @@ class Solver(object):
             if save or force:
                 if IS_ON_NSML:
                     bind_model(self.last_epoch, self.last_iter, self.model, self.ema, self.clip_grad_norm, self.optimizer_and_scheduler)
-                    # save_path = nsml.save('{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter))
-                    save_path = nsml.save(self.last_epoch)
+                    nsml.save(self.last_epoch)
                 else:
                     state_dict = {
                         'last_epoch': self.last_epoch,
@@ -352,15 +351,13 @@ class Solver(object):
                         save_path = os.path.join(self.ckpt_dir, '{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter))
                         torch.save(state_dict, save_path)
             
-                self.logger.log_info('saved in {}'.format(save_path))    
+                    self.logger.log_info('saved in {}'.format(save_path))    
                 
                 # save with the last name
-                if IS_ON_NSML:
-                    save_path = nsml.save('last.pth')
-                else:
+                if not IS_ON_NSML:
                     save_path = os.path.join(self.ckpt_dir, 'last.pth')
                     torch.save(state_dict, save_path)  
-                self.logger.log_info('saved in {}'.format(save_path))    
+                    self.logger.log_info('saved in {}'.format(save_path))    
         
     def resume(self, 
                path=None, # The path of last.pth

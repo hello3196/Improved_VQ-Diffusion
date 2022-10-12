@@ -107,7 +107,7 @@ def bind_model(last_epoch, last_iter, model, ema, clip_grad_norm, optimizer_and_
 
         save_path = os.path.join(filename, 'model.pth')
         torch.save(state_dict, save_path)
-        return save_path
+        print("saved in ", save_path)
 
     if IS_ON_NSML is True:
         nsml.bind(save=save, load=load)
