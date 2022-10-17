@@ -83,7 +83,7 @@ def get_args():
                         help='set cudnn.deterministic True')
 
     parser.add_argument('--amp', action='store_true', # default=True,
-                        help='automatic mixture of precesion')
+                        help='automatic mixture of precision')
 
     parser.add_argument('--debug', action='store_true', default=False,
                         help='set as debug mode')
@@ -188,7 +188,7 @@ def main_worker(local_rank, args):
 
     # get dataloader
     if args.only_val:
-        args.batch_size = 32
+        args.batch_size = 16
     config['dataloader']['batch_size'] = args.batch_size
     dataloader_info = build_dataloader(config, args)
 
@@ -236,6 +236,8 @@ def main_worker(local_rank, args):
     model.truncation_forward = True
 
     if args.only_val:
+        if args.local_rank==0:
+            print("Only measuring FID")
         solver.validate()
     else:
         solver.train()

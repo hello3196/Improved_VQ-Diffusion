@@ -269,6 +269,7 @@ class DiffusionTransformer(nn.Module):
 
     def predict_start(self, log_x_t, cond_emb, t):          # p(x0|xt)
         x_t = log_onehot_to_index(log_x_t)
+
         if self.amp == True:
             with autocast():
                 out = self.transformer(x_t, cond_emb, t)
@@ -338,7 +339,6 @@ class DiffusionTransformer(nn.Module):
     @torch.no_grad()
     def p_sample(self, log_x, cond_emb, t, sampled=None, to_sample=None, mask_schedule_index=None):               # sample q(xt-1) for next step from  xt, actually is p(xt-1|xt)
         model_log_prob, log_x_recon = self.p_pred(log_x, cond_emb, t)
-        
         max_sample_per_step = self.prior_ps  # max number to sample per step
         if self.mask_schedule_test != 0 and t[0] > 0 and to_sample is not None: # mask_schedule_test
             """

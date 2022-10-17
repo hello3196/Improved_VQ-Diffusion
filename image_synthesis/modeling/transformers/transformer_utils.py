@@ -430,11 +430,12 @@ class Text2ImageTransformer(nn.Module):
             t):
         cont_emb = self.content_emb(input)
         emb = cont_emb
-
+        #print("vvv")
         for block_idx in range(len(self.blocks)):   
             if self.use_checkpoint == False:
                 emb, att_weight = self.blocks[block_idx](emb, cond_emb, t.cuda()) # B x (Ld+Lt) x D, B x (Ld+Lt) x (Ld+Lt)
             else:
+         #       print("0")
                 emb, att_weight = checkpoint(self.blocks[block_idx], emb, cond_emb, t.cuda())
         logits = self.to_logits(emb) # B x (Ld+Lt) x n
         out = rearrange(logits, 'b l c -> b c l')

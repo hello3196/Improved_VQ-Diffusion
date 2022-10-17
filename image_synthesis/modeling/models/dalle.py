@@ -439,6 +439,7 @@ class DALLE(nn.Module):
 
         return out
 
+    @torch.no_grad()
     def generate_content_for_metric(
         self,
         *,
