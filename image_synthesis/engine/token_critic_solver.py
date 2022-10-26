@@ -115,6 +115,9 @@ class Token_Critic_Solver(object):
             self.scaler = GradScaler()
             self.logger.log_info('Using AMP for training!')
 
+        if self.args.only_val:
+            self.fid = FrechetInceptionDistance(2048).to(self.device)
+
         self.logger.log_info("{}: global rank {}: prepare solver done!".format(self.args.name,self.args.global_rank), check_primary=False)
 
     def _get_optimizer_and_scheduler(self, op_sc_list):
@@ -531,28 +534,39 @@ class Token_Critic_Solver(object):
                 self.dataloader['validation_loader'].sampler.set_epoch(self.last_epoch)
 
             self.model.eval()
+            # num_batch = len(self.dataloader['validation_loader'])   # -> full
+            num_batch = 625                                         # 625 -> 40k, 1250 -> 80k
 
-            fid = FrechetInceptionDistance(2048).cuda()
-            num_data = len(self.dataloader['validation_loader'])
+            tot_batch = []
+            tot_out = []
             for itr, batch in enumerate(self.dataloader['validation_loader']):
+                if itr==num_batch:
+                    del batch
+                    break
                 batch["image"] = batch["image"].to(self.device)
                 with torch.no_grad():
                     if self.args.amp:
                         with autocast():
-                            output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
+                            if self.args.distributed:
+                                output = self.model.module.generate_content_for_metric(batch=batch, filter_ratio=0)
+                            else:
+                                output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
                     else:
-                        output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
+                        if self.args.distributed:
+                            output = self.model.module.generate_content_for_metric(batch=batch, filter_ratio=0)
+                        else:
+                            output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
 
-                fid.update(batch["image"].type(torch.uint8), real=True)
-                fid.update(output.type(torch.uint8), real=False)
-                print("[ ", itr*output.shape[0], " / ", num_data, " ]")
-                del batch
-            fid = fid.compute()
-            
-            if self.args.local_rank !=0:
-                return float ('nan')
-            
-            print("FID : ", float(fid))
+                self.fid.update(batch["image"].type(torch.uint8), real=True)
+                self.fid.update(output.type(torch.uint8), real=False)
+                if self.args.local_rank==0:
+                    print("[ ", itr, " / ", num_batch, " ]")
+                del batch, output
+            if self.args.local_rank==0:
+                print("computing...")
+            fid_score = self.fid.compute()
+            if self.args.local_rank ==0:
+                print("FID : ", float(fid_score))
 
     def validate(self):
         self.validate_epoch_fid()

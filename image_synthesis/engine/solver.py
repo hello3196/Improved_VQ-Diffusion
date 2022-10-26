@@ -574,8 +574,8 @@ class Solver(object):
                 self.dataloader['validation_loader'].sampler.set_epoch(self.last_epoch)
 
             self.model.eval()
-            num_batch = len(self.dataloader['validation_loader'])
-            # num_batch = 5
+            # num_batch = len(self.dataloader['validation_loader'])
+            num_batch = 625
             
             tot_batch = []
             tot_out = []
