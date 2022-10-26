@@ -574,14 +574,14 @@ class Solver(object):
                 self.dataloader['validation_loader'].sampler.set_epoch(self.last_epoch)
 
             self.model.eval()
-            # num_batch = len(self.dataloader['validation_loader'])
-            num_batch = 1250
+            num_batch = len(self.dataloader['validation_loader'])
+            # num_batch = 5
             
             tot_batch = []
             tot_out = []
             for itr, batch in enumerate(self.dataloader['validation_loader']):
                 if itr==num_batch:
-                    del batch, output
+                    del batch
                     break
                 batch["image"] = batch["image"].to(self.device)
                 with torch.no_grad():
@@ -602,9 +602,11 @@ class Solver(object):
                 if self.args.local_rank==0:
                     print("[ ", itr, " / ", num_batch,  " ]")
                 del batch, output
-            print("computing...")
+            if self.args.local_rank==0:
+                print("computing...")
             fid_score = self.fid.compute()
-            print("FID : ", float(fid_score))
+            if self.args.local_rank==0:
+                print("FID : ", float(fid_score))
 
     def validate(self):
         self.validate_epoch_fid()
