@@ -192,21 +192,6 @@ def main_worker(local_rank, args):
     config['dataloader']['batch_size'] = args.batch_size
     dataloader_info = build_dataloader(config, args)
 
-    # get solver
-    solver = Solver(config=config, args=args, model=model, dataloader=dataloader_info, logger=logger)
-
-    # resume
-    if args.load_path is not None: # only load the model parameters
-        solver.resume(path=args.load_path,
-                      # load_model=True,
-                      load_optimizer_and_scheduler=False,
-                      load_others=False
-                      )
-    if args.auto_resume:
-        solver.resume()
-    # with torch.autograd.set_detect_anomaly(True):
-    #     solver.train()
-
     model.transformer.mask_schedule_test = args.schedule
     model.guidance_scale = args.guidance
 
@@ -234,6 +219,23 @@ def main_worker(local_rank, args):
         return log_pred
     model.transformer.cf_predict_start = model.predict_start_with_truncation(cf_predict_start, ("top"+str(args.truncation_rate)+'r'))
     model.truncation_forward = True
+    
+    # get solver
+    solver = Solver(config=config, args=args, model=model, dataloader=dataloader_info, logger=logger)
+
+    # resume
+    if args.load_path is not None: # only load the model parameters
+        solver.resume(path=args.load_path,
+                      # load_model=True,
+                      load_optimizer_and_scheduler=False,
+                      load_others=False
+                      )
+    if args.auto_resume:
+        solver.resume()
+    # with torch.autograd.set_detect_anomaly(True):
+    #     solver.train()
+
+    
 
     if args.only_val:
         if args.local_rank==0:

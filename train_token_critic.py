@@ -199,6 +199,16 @@ def get_args():
     parser.add_argument('--truncation_rate', type=float, default=0.86, 
                         help='truncation rate (default: 0.86)')
 
+    parser.add_argument('--tc_step', type=int, default=16, 
+                        help='token critic decoding step (available: 16(default), 50, 100)')
+    parser.add_argument('--tc_weight', type=float, default=1., 
+                        help='token critic score weight (default: 1.0')   
+    parser.add_argument('--tc_a', type=float, default=0., 
+                        help='noise schedule a (default: 0.)')
+    parser.add_argument('--tc_b', type=float, default=0., 
+                        help='noise schedule b (default: 0.)')
+    parser.add_argument('--tc_guidance', type=float, default=None, 
+                        help='token critic CF-guidance scale (default: None)')
     # args for modify config
     parser.add_argument(
         "opts",
@@ -283,21 +293,6 @@ def main_worker(local_rank, args):
     config['dataloader']['batch_size'] = args.batch_size
     dataloader_info = build_dataloader(config, args)
 
-    # get solver
-    solver = Token_Critic_Solver(config=config, args=args, token_critic_model=Token_Critic_model,
-                                diffusion_model=VQ_Diffusion_model, dataloader=dataloader_info, logger=logger)
-
-    # resume 
-    if args.load_path is not None: # only load the model parameters
-        solver.resume(path=args.load_path,
-                      # load_model=True,
-                      load_optimizer_and_scheduler=False,
-                      load_others=False)
-    if args.auto_resume:
-        solver.resume()
-    # with torch.autograd.set_detect_anomaly(True):
-    #     solver.train()
-
     # CF guidance setting
     batch_size = args.batch_size
     cf_cond_emb = VQ_Diffusion_model.model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
@@ -313,6 +308,23 @@ def main_worker(local_rank, args):
         return log_pred
     VQ_Diffusion_model.model.transformer.cf_predict_start = VQ_Diffusion_model.model.predict_start_with_truncation(cf_predict_start, ("top"+str(args.truncation_rate)+'r'))
     VQ_Diffusion_model.model.truncation_forward = True
+    
+    # get solver
+    solver = Token_Critic_Solver(config=config, args=args, token_critic_model=Token_Critic_model,
+                                diffusion_model=VQ_Diffusion_model, dataloader=dataloader_info, logger=logger)
+
+    # resume 
+    if args.load_path is not None: # only load the model parameters
+        solver.resume(path=args.load_path,
+                      # load_model=True,
+                      load_optimizer_and_scheduler=False,
+                      load_others=False)
+    if args.auto_resume:
+        solver.resume()
+    # with torch.autograd.set_detect_anomaly(True):
+    #     solver.train()
+
+    
 
     if args.only_val:
         solver.validate()

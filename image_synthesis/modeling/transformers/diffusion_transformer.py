@@ -1158,7 +1158,7 @@ class DiffusionTransformer(nn.Module):
         cond_emb = cond_emb.float()
 
         # time sampling
-        t, pt = self.sample_time(batch_size, device, 'importance')
+        t = torch.randint(0, self.num_timesteps, (batch_size,), device=device).long()
         # real_token -> masking & finding changed location
         real_token = index_to_log_onehot(input['real_token'], self.num_classes) # b, 4096, 1024
         log_xt = self.q_sample(log_x_start=real_token, t=t) # noised token with random t, log p form

@@ -9,6 +9,7 @@ import os
 import time
 import math
 import torch
+import torch.nn.functional as F
 import threading
 import multiprocessing
 import copy
@@ -38,6 +39,17 @@ import nsml
 
 STEP_WITH_LOSS_SCHEDULERS = (ReduceLROnPlateauWithWarmup, ReduceLROnPlateau)
 
+def index_to_log_onehot(x, num_classes):
+    assert x.max().item() < num_classes, \
+        f'Error: {x.max().item()} >= {num_classes}'
+    x_onehot = F.one_hot(x, num_classes)
+    permute_order = (0, -1) + tuple(range(1, len(x.size())))
+    x_onehot = x_onehot.permute(permute_order)
+    log_x = torch.log(x_onehot.float().clamp(min=1e-30))
+    return log_x
+
+def log_onehot_to_index(log_x):
+    return log_x.argmax(1)
 
 class Token_Critic_Solver(object):
     def __init__(self, config, args, token_critic_model, diffusion_model, dataloader, logger):
@@ -48,6 +60,7 @@ class Token_Critic_Solver(object):
         self.logger = logger
         self.vq_diffusion = diffusion_model
         self.use_my_ckpt = args.use_my_ckpt
+        self.empty_text_embed = self.model.empty_text_embed
 
         self.max_epochs = config['solver']['max_epochs']
         self.save_epochs = config['solver']['save_epochs']
@@ -119,6 +132,11 @@ class Token_Critic_Solver(object):
             self.fid = FrechetInceptionDistance(2048).to(self.device)
 
         self.logger.log_info("{}: global rank {}: prepare solver done!".format(self.args.name,self.args.global_rank), check_primary=False)
+
+        
+        self.num_classes = self.vq_diffusion.model.transformer.num_classes
+        self.n_sample = [64] * 16
+        self.time_list = [index for index in range(100 -5, -1, -6)]
 
     def _get_optimizer_and_scheduler(self, op_sc_list):
         optimizer_and_scheduler = {}
@@ -520,6 +538,85 @@ class Token_Critic_Solver(object):
                         self.logger.add_scalar(tag='val/{}/{}'.format(loss_n, k), scalar_value=float(loss_dict[k]), global_step=self.last_epoch)
                 self.logger.log_info(info)
 
+    def n_t(self, t, a=0.1, b=0.2):
+        # t smaller(initial stage) -> variance bigger
+        p = t / 100 * a + b
+        return p
+
+    @torch.no_grad()
+    def generate_token_critic_for_metric(self, batch):
+        batch_size = len(batch['text'])
+        
+        with torch.no_grad(): # condition(CLIP) -> freeze
+            condition_token = self.vq_diffusion.model.condition_codec.get_tokens(batch['text']) # BPE token
+            cond_ = {}
+            for k, v in condition_token.items():
+                v = v.to(self.device) if torch.is_tensor(v) else v
+                cond_['condition_' + k] = v
+            cond_emb = self.vq_diffusion.model.transformer.condition_emb(cond_['condition_token']).float() # CLIP condition
+            tc_cf_cond_emb = self.empty_text_embed
+
+        zero_logits = torch.zeros((batch_size, self.num_classes-1, self.vq_diffusion.model.transformer.shape),device=self.device)
+        one_logits = torch.ones((batch_size, 1, self.vq_diffusion.model.transformer.shape),device=self.device)
+        mask_logits = torch.cat((zero_logits, one_logits), dim=1)
+        log_z = torch.log(mask_logits)
+
+        with torch.no_grad():
+            for i, (n, diffusion_index) in enumerate(zip(self.n_sample[:-1], self.time_list[:-1])): # before last step
+                # 1) VQ: 1 step reconstruction
+                t = torch.full((batch_size,), diffusion_index, device=self.device, dtype=torch.long)
+                _, log_x_recon = self.vq_diffusion.model.transformer.p_pred(log_z, cond_emb, t)
+                out = self.vq_diffusion.model.transformer.log_sample_categorical(log_x_recon) # recon -> sample -> x_0
+                out_idx = log_onehot_to_index(out) # b, 1024
+                out2_idx = torch.full_like(out_idx, self.num_classes-1).to(out_idx.device) # all mask index list
+
+                # 2) TC: Masking based on score
+                t_1 = torch.full((batch_size,), self.time_list[i+1], device=self.device, dtype=torch.long) # t-1 step
+
+                if self.args.amp:
+                    with autocast():
+                        if self.args.distributed:
+                            score = self.model.module.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=cond_emb) # b, 1024
+                            if self.args.tc_guidance != None:
+                                cf_score = self.model.module.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=tc_cf_cond_emb)
+                                score = cf_score + self.args.tc_guidance * (score - cf_score)
+                        else:
+                            score = self.model.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=cond_emb) # b, 1024
+                            if self.args.tc_guidance != None:
+                                cf_score = self.model.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=tc_cf_cond_emb)
+                                score = cf_score + self.args.tc_guidance * (score - cf_score)
+                else:
+                    if self.args.distributed:
+                        score = self.model.module.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=cond_emb) # b, 1024
+                        if self.args.tc_guidance != None:
+                            cf_score = self.model.module.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=tc_cf_cond_emb)
+                            score = cf_score + self.args.tc_guidance * (score - cf_score)
+                    else:
+                        score = self.model.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=cond_emb) # b, 1024
+                        if self.args.tc_guidance != None:
+                            cf_score = self.model.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=tc_cf_cond_emb)
+                            score = cf_score + self.args.tc_guidance * (score - cf_score)
+                                
+                score = 1 - score # (1 - score) = unchanged(sample) confidence score (because score means changed confidence)
+                score = score.clamp(min = 0) # score clamp for CF minus probability
+                score = score * self.args.tc_weight
+                score += self.n_t(diffusion_index, self.args.tc_a, self.args.tc_b) # n(t) for randomness
+
+                for ii in range(batch_size):
+                    sel = torch.multinomial(score[ii], n)
+                    # _, sel = torch.topk(score[ii], n, dim=0) # determinisitic
+                    out2_idx[ii][sel] = out_idx[ii][sel]
+                log_z = index_to_log_onehot(out2_idx, self.num_classes)
+
+            # Final step
+            t = torch.full((batch_size,), self.time_list[-1], device=self.device, dtype=torch.long)
+            _, log_x_recon = self.vq_diffusion.model.transformer.p_pred(log_z, cond_emb, t)
+            out = self.vq_diffusion.model.transformer.log_sample_categorical(log_x_recon) # recon -> sample -> x_0
+            content_token = log_onehot_to_index(out) # b, 1024
+
+            content = self.vq_diffusion.model.content_codec.decode(content_token) 
+        return content
+
     def validate_epoch_fid(self):
         if 'validation_loader' not in self.dataloader:
             val = False
@@ -545,17 +642,7 @@ class Token_Critic_Solver(object):
                     break
                 batch["image"] = batch["image"].to(self.device)
                 with torch.no_grad():
-                    if self.args.amp:
-                        with autocast():
-                            if self.args.distributed:
-                                output = self.model.module.generate_content_for_metric(batch=batch, filter_ratio=0)
-                            else:
-                                output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
-                    else:
-                        if self.args.distributed:
-                            output = self.model.module.generate_content_for_metric(batch=batch, filter_ratio=0)
-                        else:
-                            output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
+                    output = self.generate_token_critic_for_metric(batch = batch)
 
                 self.fid.update(batch["image"].type(torch.uint8), real=True)
                 self.fid.update(output.type(torch.uint8), real=False)
@@ -569,6 +656,20 @@ class Token_Critic_Solver(object):
                 print("FID : ", float(fid_score))
 
     def validate(self):
+        # setting for token_critic inference
+        if self.args.tc_step == 16:
+            self.n_sample = [64] * 16
+            self.time_list = [index for index in range(100 -5, -1, -6)]
+        elif self.args.tc_step == 50:
+            self.n_sample = [10] + [21, 20] * 24 + [30]
+            self.time_list = [index for index in range(100 -1, -1, -2)]
+        else: # 100
+            self.n_sample = [1, 10] + [11, 10, 10] * 32 + [11, 11]
+            self.time_list = [index for index in range(100 -1, -1, -1)]
+
+        for s in range(1, self.args.tc_step):
+            self.n_sample[s] += self.n_sample[s-1]
+
         self.validate_epoch_fid()
 
     def train(self):
