@@ -423,7 +423,24 @@ class Solver(object):
                             self.optimizer_and_scheduler[op_sc_n][k] = op_sc[k]
         
         self.logger.log_info('Resume from {}'.format(path))
-
+        
+        # CF guidance setting
+        batch_size = self.args.batch_size
+        cf_cond_emb = self.model.module.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
+        def cf_predict_start(log_x_t, cond_emb, t):
+            log_x_recon = self.model.module.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
+            if abs(self.model.module.guidance_scale - 1) < 1e-3:
+                return torch.cat((log_x_recon, self.model.module.transformer.zero_vector), dim=1)
+            cf_log_x_recon = self.model.module.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
+            log_new_x_recon = cf_log_x_recon + self.args.guidance * (log_x_recon - cf_log_x_recon)
+            log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
+            log_new_x_recon = log_new_x_recon.clamp(-70, 0)
+            log_pred = torch.cat((log_new_x_recon, self.model.module.transformer.zero_vector), dim=1)
+            return log_pred
+        self.model.module.transformer.cf_predict_start = self.model.module.predict_start_with_truncation(cf_predict_start, ("top"+str(self.args.truncation_rate)+'r'))
+        self.model.module.truncation_forward = True
+        self.logger.log_info(f'CF setting finished')
+        
     
     def train_epoch(self):
         self.model.train()

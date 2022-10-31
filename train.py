@@ -204,22 +204,6 @@ def main_worker(local_rank, args):
         for s in range(1, len(model.transformer.n_sample)):
             model.transformer.n_sample[s] += model.transformer.n_sample[s - 1]
 
-    # CF guidance setting
-    batch_size = args.batch_size
-    cf_cond_emb = model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
-    def cf_predict_start(log_x_t, cond_emb, t):
-        log_x_recon = model.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
-        if abs(model.guidance_scale - 1) < 1e-3:
-            return torch.cat((log_x_recon, model.transformer.zero_vector), dim=1)
-        cf_log_x_recon = model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
-        log_new_x_recon = cf_log_x_recon + model.guidance_scale * (log_x_recon - cf_log_x_recon)
-        log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
-        log_new_x_recon = log_new_x_recon.clamp(-70, 0)
-        log_pred = torch.cat((log_new_x_recon, model.transformer.zero_vector), dim=1)
-        return log_pred
-    model.transformer.cf_predict_start = model.predict_start_with_truncation(cf_predict_start, ("top"+str(args.truncation_rate)+'r'))
-    model.truncation_forward = True
-    
     # get solver
     solver = Solver(config=config, args=args, model=model, dataloader=dataloader_info, logger=logger)
 
@@ -233,9 +217,7 @@ def main_worker(local_rank, args):
     if args.auto_resume:
         solver.resume()
     # with torch.autograd.set_detect_anomaly(True):
-    #     solver.train()
-
-    
+    #     solver.train()    
 
     if args.only_val:
         if args.local_rank==0:
