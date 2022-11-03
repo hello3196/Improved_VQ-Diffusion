@@ -52,6 +52,24 @@ class FullAttention(nn.Module):
         y = self.resid_drop(self.proj(y))
         return y, att
 
+class TextAttention(nn.Module):
+    def __init__(self,
+                 n_head, # the number of heads
+                 attn_pdrop=0.1, # attention dropout prob
+    ):
+        super().__init__()
+        self.n_head = n_head
+
+    def forward(self, x, mask=None):
+        B, T, C = x.size()
+        k = x.transpose(1, 2) # (B, C, T)
+        q = x # (B, T, C)
+        att = (q @ k) * (1.0 / math.sqrt(k.size(-1))) # (B, T, T)
+
+        att = F.softmax(att, dim=-1) # (B, T, T)
+        att = att.mean(dim=1, keepdim=False) # (B, T, T)
+        return att
+
 class CrossAttention(nn.Module):
     def __init__(self,
                  condition_seq_len,
@@ -87,21 +105,26 @@ class CrossAttention(nn.Module):
         B, T, C = x.size()
         B, T_E, _ = encoder_output.size()
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        k = self.key(encoder_output).view(B, T_E, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        k = self.key(encoder_output).view(B, T_E, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T_E, hs)
         q = self.query(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = self.value(encoder_output).view(B, T_E, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = self.value(encoder_output).view(B, T_E, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T_E, hs)
 
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, T)
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, T_E)
 
-        att = F.softmax(att, dim=-1) # (B, nh, T, T)
+        att2 = att
+        att2 = F.softmax(att2, dim=-2) # (B, nh, T, T_E)
+        att2 = self.attn_drop(att2) # (B, nh, T, T_E)
+        att2 = att2.mean(dim=1, keepdim=False) # (B, T, T_E)
+        att2 = att2.mean(dim=-1, keepdim=False) # (B, T)
+
+        att = F.softmax(att, dim=-1) # (B, nh, T, T_E)
         att = self.attn_drop(att)
-        y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = att @ v # (B, nh, T, T_E) x (B, nh, T_E, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side, (B, T, C)
-        att = att.mean(dim=1, keepdim=False) # (B, T, T)
 
         # output projection
         y = self.resid_drop(self.proj(y))
-        return y, att
+        return y, att2
 
 class GELU2(nn.Module):
     def __init__(self):
@@ -311,6 +334,8 @@ class Text2Logit(nn.Module): # Text2ImageTransformer
 
         self.use_checkpoint = checkpoint
         self.content_emb = instantiate_from_config(content_emb_config)
+        
+        self.use_attn_map = False
 
         # transformer
         assert attn_type == 'selfcross'
@@ -432,4 +457,10 @@ class Text2Logit(nn.Module): # Text2ImageTransformer
                 emb, att_weight = checkpoint(self.blocks[block_idx], emb, cond_emb, t.cuda())
         logits = self.to_logits(emb) # B x (Ld+Lt) x n
         out = rearrange(logits, 'b l c -> b c l')
+        if self.use_attn_map:
+            att_weight = att_weight[:,None,:]
+            print(att_weight.shape)
+            print(out[0])
+            out += att_weight
+            print(out[0])
         return out

@@ -49,7 +49,6 @@ class CLIPTextEmbedding(BaseEmbedding):
     def encode_text(self, text):
         text[text < 0] = 0 # some padded text token maybe negative, so set them to 0
         x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
-
         x = x + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
@@ -73,7 +72,6 @@ class CLIPTextEmbedding(BaseEmbedding):
         """
         assert index.dim() == 2 # B x L
         text_feature = self.encode_text(index)
-
         if self.embed_dim == 1024:
             text_features = torch.cat((text_feature, text_feature), dim=2)
         else:
@@ -86,6 +84,5 @@ class CLIPTextEmbedding(BaseEmbedding):
             if self.keep_seq_len_dim:
                 last_feature = last_feature.unsqueeze(dim=1)
             return text_features, last_feature
-
 
         return text_features
