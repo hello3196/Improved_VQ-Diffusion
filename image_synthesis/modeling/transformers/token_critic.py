@@ -52,24 +52,6 @@ class FullAttention(nn.Module):
         y = self.resid_drop(self.proj(y))
         return y, att
 
-class TextAttention(nn.Module):
-    def __init__(self,
-                 n_head, # the number of heads
-                 attn_pdrop=0.1, # attention dropout prob
-    ):
-        super().__init__()
-        self.n_head = n_head
-
-    def forward(self, x, mask=None):
-        B, T, C = x.size()
-        k = x.transpose(1, 2) # (B, C, T)
-        q = x # (B, T, C)
-        att = (q @ k) * (1.0 / math.sqrt(k.size(-1))) # (B, T, T)
-
-        att = F.softmax(att, dim=-1) # (B, T, T)
-        att = att.mean(dim=1, keepdim=False) # (B, T, T)
-        return att
-
 class CrossAttention(nn.Module):
     def __init__(self,
                  condition_seq_len,
