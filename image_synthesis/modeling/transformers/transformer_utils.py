@@ -105,6 +105,7 @@ class CrossAttention(nn.Module):
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, T)
 
         att2 = F.sigmoid(att)
+        print(att2[0])
         att2 = att2.mean(dim=1, keepdim=False) # (B, T, T_E)
         att2 = att2.mean(dim=-1, keepdim=False) # (B, T)
 
@@ -446,6 +447,10 @@ class Text2ImageTransformer(nn.Module):
             if self.use_checkpoint == False:
                 emb, att_weight = self.blocks[block_idx](emb, cond_emb, t.cuda()) # B x (Ld+Lt) x D, B x (Ld+Lt) x (Ld+Lt)
                 if self.use_attn_map:
+                    show_img(att_weight[0].reshape((1,1,32,32)), "mid", viz)
+                    show_img(att_weight[1].reshape((1,1,32,32)), "mid", viz)
+                    show_img(att_weight[2].reshape((1,1,32,32)), "mid", viz)
+                    show_img(att_weight[3].reshape((1,1,32,32)), "mid", viz)
                     att_total += att_weight
             else:
                 emb, att_weight = checkpoint(self.blocks[block_idx], emb, cond_emb, t.cuda())
