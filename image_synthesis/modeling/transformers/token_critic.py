@@ -93,12 +93,6 @@ class CrossAttention(nn.Module):
 
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, T_E)
 
-        att2 = att
-        att2 = F.softmax(att2, dim=-2) # (B, nh, T, T_E)
-        att2 = self.attn_drop(att2) # (B, nh, T, T_E)
-        att2 = att2.mean(dim=1, keepdim=False) # (B, T, T_E)
-        att2 = att2.mean(dim=-1, keepdim=False) # (B, T)
-
         att = F.softmax(att, dim=-1) # (B, nh, T, T_E)
         att = self.attn_drop(att)
         y = att @ v # (B, nh, T, T_E) x (B, nh, T_E, hs) -> (B, nh, T, hs)
@@ -106,7 +100,7 @@ class CrossAttention(nn.Module):
 
         # output projection
         y = self.resid_drop(self.proj(y))
-        return y, att2
+        return y
 
 class GELU2(nn.Module):
     def __init__(self):
@@ -273,7 +267,6 @@ class Block(nn.Module):
             x = x + a 
 
         x = x + self.mlp(self.ln2(x))
-
         return x, att
 
 class Conv_MLP(nn.Module):
@@ -316,8 +309,6 @@ class Text2Logit(nn.Module): # Text2ImageTransformer
 
         self.use_checkpoint = checkpoint
         self.content_emb = instantiate_from_config(content_emb_config)
-        
-        self.use_attn_map = False
 
         # transformer
         assert attn_type == 'selfcross'
@@ -439,10 +430,4 @@ class Text2Logit(nn.Module): # Text2ImageTransformer
                 emb, att_weight = checkpoint(self.blocks[block_idx], emb, cond_emb, t.cuda())
         logits = self.to_logits(emb) # B x (Ld+Lt) x n
         out = rearrange(logits, 'b l c -> b c l')
-        if self.use_attn_map:
-            att_weight = att_weight[:,None,:]
-            print(att_weight.shape)
-            print(out[0])
-            out += att_weight
-            print(out[0])
         return out

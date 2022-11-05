@@ -19,6 +19,10 @@ from inspect import isfunction
 from torch.cuda.amp import autocast
 from torch.utils.checkpoint import checkpoint
 
+import visdom
+import nsml
+viz = nsml.Visdom(visdom=visdom)
+
 class FullAttention(nn.Module):
     def __init__(self,
                  n_embd, # the embed dim
@@ -100,6 +104,10 @@ class CrossAttention(nn.Module):
 
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, T)
 
+        att2 = F.sigmoid(att)
+        att2 = att2.mean(dim=1, keepdim=False) # (B, T, T_E)
+        att2 = att2.mean(dim=-1, keepdim=False) # (B, T)
+
         att = F.softmax(att, dim=-1) # (B, nh, T, T)
         att = self.attn_drop(att)
         y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -108,7 +116,7 @@ class CrossAttention(nn.Module):
 
         # output projection
         y = self.resid_drop(self.proj(y))
-        return y, att
+        return y, att2
 
 class GELU2(nn.Module):
     def __init__(self):
@@ -319,6 +327,8 @@ class Text2ImageTransformer(nn.Module):
         self.use_checkpoint = checkpoint
         self.content_emb = instantiate_from_config(content_emb_config)
 
+        self.use_attn_map = True
+
         # transformer
         assert attn_type == 'selfcross'
         all_attn_type = [attn_type] * n_layer
@@ -430,16 +440,25 @@ class Text2ImageTransformer(nn.Module):
             t):
         cont_emb = self.content_emb(input)
         emb = cont_emb
-        #print("vvv")
+        att_total = torch.zeros((emb.shape[0], 1024)).cuda()
+
         for block_idx in range(len(self.blocks)):   
             if self.use_checkpoint == False:
                 emb, att_weight = self.blocks[block_idx](emb, cond_emb, t.cuda()) # B x (Ld+Lt) x D, B x (Ld+Lt) x (Ld+Lt)
+                if self.use_attn_map:
+                    att_total += att_weight
             else:
-         #       print("0")
                 emb, att_weight = checkpoint(self.blocks[block_idx], emb, cond_emb, t.cuda())
         logits = self.to_logits(emb) # B x (Ld+Lt) x n
         out = rearrange(logits, 'b l c -> b c l')
-        return out
+        if self.use_attn_map:
+            att_total /= len(self.blocks)
+            att_total = att_total.reshape((-1,1,32,32))
+            show_img(att_total[0].reshape((1,1,32,32)), "att", viz)
+            show_img(att_total[1].reshape((1,1,32,32)), "att", viz)
+            show_img(att_total[2].reshape((1,1,32,32)), "att", viz)
+            show_img(att_total[3].reshape((1,1,32,32)), "att", viz)
+        return out2
 
 class Condition2ImageTransformer(nn.Module):
     def __init__(
@@ -722,3 +741,12 @@ class UnCondition2ImageTransformer(nn.Module):
         logits = self.to_logits(emb) # B x (Ld+Lt) x n
         out = rearrange(logits, 'b l c -> b c l')
         return out
+
+def show_img(img, name, viz):
+    up = nn.Upsample(scale_factor=8, mode='nearest')
+    img = up(img)
+    img = (1-img).cpu().detach()
+    img = np.asarray(img, dtype=np.float32)
+    img = img * 255
+    img = np.rint(img).clip(0,255).astype(np.uint8)
+    viz.image(img, opts=dict(title=name, caption=name))
