@@ -105,7 +105,6 @@ class CrossAttention(nn.Module):
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, T)
 
         att2 = F.sigmoid(att)
-        print(att2[0])
         att2 = att2.mean(dim=1, keepdim=False) # (B, T, T_E)
         att2 = att2.mean(dim=-1, keepdim=False) # (B, T)
 
@@ -327,8 +326,8 @@ class Text2ImageTransformer(nn.Module):
 
         self.use_checkpoint = checkpoint
         self.content_emb = instantiate_from_config(content_emb_config)
-
-        self.use_attn_map = True
+        
+        self.att_total = None
 
         # transformer
         assert attn_type == 'selfcross'
@@ -441,29 +440,25 @@ class Text2ImageTransformer(nn.Module):
             t):
         cont_emb = self.content_emb(input)
         emb = cont_emb
-        att_total = torch.zeros((emb.shape[0], 1024)).cuda()
+        self.att_total = torch.zeros((emb.shape[0], 1024)).cuda()
 
         for block_idx in range(len(self.blocks)):   
             if self.use_checkpoint == False:
                 emb, att_weight = self.blocks[block_idx](emb, cond_emb, t.cuda()) # B x (Ld+Lt) x D, B x (Ld+Lt) x (Ld+Lt)
-                if self.use_attn_map:
-                    show_img(att_weight[0].reshape((1,1,32,32)), "mid", viz)
-                    show_img(att_weight[1].reshape((1,1,32,32)), "mid", viz)
-                    show_img(att_weight[2].reshape((1,1,32,32)), "mid", viz)
-                    show_img(att_weight[3].reshape((1,1,32,32)), "mid", viz)
-                    att_total += att_weight
+                if block_idx<13:
+                    self.att_total += att_weight
             else:
                 emb, att_weight = checkpoint(self.blocks[block_idx], emb, cond_emb, t.cuda())
         logits = self.to_logits(emb) # B x (Ld+Lt) x n
         out = rearrange(logits, 'b l c -> b c l')
-        if self.use_attn_map:
-            att_total /= len(self.blocks)
-            att_total = att_total.reshape((-1,1,32,32))
-            show_img(att_total[0].reshape((1,1,32,32)), "att", viz)
-            show_img(att_total[1].reshape((1,1,32,32)), "att", viz)
-            show_img(att_total[2].reshape((1,1,32,32)), "att", viz)
-            show_img(att_total[3].reshape((1,1,32,32)), "att", viz)
-        return out2
+
+        print("image printed")
+        self.att_total = self.att_total.reshape((-1,1,32,32))
+        show_img(self.att_total[0].reshape((1,1,32,32)), "att", viz)
+        show_img(self.att_total[1].reshape((1,1,32,32)), "att", viz)
+        show_img(self.att_total[2].reshape((1,1,32,32)), "att", viz)
+        show_img(self.att_total[3].reshape((1,1,32,32)), "att", viz)
+        return out
 
 class Condition2ImageTransformer(nn.Module):
     def __init__(

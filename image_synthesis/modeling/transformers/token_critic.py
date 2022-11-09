@@ -100,7 +100,7 @@ class CrossAttention(nn.Module):
 
         # output projection
         y = self.resid_drop(self.proj(y))
-        return y
+        return y, att
 
 class GELU2(nn.Module):
     def __init__(self):
