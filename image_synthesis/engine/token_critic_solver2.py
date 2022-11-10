@@ -9,6 +9,7 @@ import os
 import time
 import math
 import torch
+import torch.nn.functional as F
 import threading
 import multiprocessing
 import copy
@@ -16,7 +17,7 @@ from PIL import Image
 from torch.nn.utils import clip_grad_norm_, clip_grad_norm
 import torchvision
 from image_synthesis.utils.misc import instantiate_from_config, format_seconds
-from image_synthesis.distributed.distributed import reduce_dict, all_gather, synchronize
+from image_synthesis.distributed.distributed import reduce_dict
 from image_synthesis.distributed.distributed import is_primary, get_rank
 from image_synthesis.utils.misc import get_model_parameters_info
 from image_synthesis.engine.lr_scheduler import ReduceLROnPlateauWithWarmup, CosineAnnealingLRWithWarmup
@@ -33,21 +34,35 @@ except:
 import scipy.linalg
 import numpy as np
 from nsml import IS_ON_NSML
-import nsml
 from nsml_utils import bind_model
+import nsml
 
 STEP_WITH_LOSS_SCHEDULERS = (ReduceLROnPlateauWithWarmup, ReduceLROnPlateau)
 
+def index_to_log_onehot(x, num_classes):
+    assert x.max().item() < num_classes, \
+        f'Error: {x.max().item()} >= {num_classes}'
+    x_onehot = F.one_hot(x, num_classes)
+    permute_order = (0, -1) + tuple(range(1, len(x.size())))
+    x_onehot = x_onehot.permute(permute_order)
+    log_x = torch.log(x_onehot.float().clamp(min=1e-30))
+    return log_x
 
-class Solver(object):
-    def __init__(self, config, args, model, dataloader, logger):
+def log_onehot_to_index(log_x):
+    return log_x.argmax(1)
+
+class Token_Critic_Solver(object):
+    def __init__(self, config, args, token_critic_model, diffusion_model, dataloader, logger):
         self.config = config
         self.args = args
-        self.model = model 
+        self.model = token_critic_model 
         self.dataloader = dataloader
         self.logger = logger
+        self.vq_diffusion = diffusion_model
         self.use_my_ckpt = args.use_my_ckpt
-        
+        # if self.model.learnable_cf:
+        #     self.empty_text_embed = self.model.empty_text_embed
+
         self.max_epochs = config['solver']['max_epochs']
         self.save_epochs = config['solver']['save_epochs']
         self.save_iterations = config['solver'].get('save_iterations', -1)
@@ -85,8 +100,8 @@ class Solver(object):
             raise NotImplementedError('Unknown type of adjust lr {}!'.format(adjust_lr))
         self.logger.log_info('Get lr {} from base lr {} with {}'.format(self.lr, base_lr, adjust_lr))
 
-        if hasattr(model, 'get_optimizer_and_scheduler') and callable(getattr(model, 'get_optimizer_and_scheduler')):
-            optimizer_and_scheduler = model.get_optimizer_and_scheduler(config['solver']['optimizers_and_schedulers'])
+        if hasattr(token_critic_model, 'get_optimizer_and_scheduler') and callable(getattr(token_critic_model, 'get_optimizer_and_scheduler')):
+            optimizer_and_scheduler = token_critic_model.get_optimizer_and_scheduler(config['solver']['optimizers_and_schedulers'])
         else:
             optimizer_and_scheduler = self._get_optimizer_and_scheduler(config['solver']['optimizers_and_schedulers'])
 
@@ -101,12 +116,16 @@ class Solver(object):
         else:
             self.ema = None
 
+        self.num_classes = self.vq_diffusion.transformer.num_classes
         self.logger.log_info(str(get_model_parameters_info(self.model)))
         self.model.cuda()
+        self.vq_diffusion.cuda()
+        
         self.device = self.model.device
         if self.args.distributed:
             self.logger.log_info('Distributed, begin DDP the model...')
             self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=[self.args.gpu], find_unused_parameters=False)
+            self.vq_diffusion = torch.nn.parallel.DistributedDataParallel(self.vq_diffusion, device_ids=[self.args.gpu], find_unused_parameters=False)
             self.logger.log_info('Distributed, DDP model done!')
         # prepare for amp
         self.args.amp = self.args.amp and AMP
@@ -118,6 +137,11 @@ class Solver(object):
             self.fid = FrechetInceptionDistance(2048).to(self.device)
 
         self.logger.log_info("{}: global rank {}: prepare solver done!".format(self.args.name,self.args.global_rank), check_primary=False)
+
+        
+        
+        self.n_sample = [64] * 16
+        self.time_list = [index for index in range(100 -5, -1, -6)]
 
     def _get_optimizer_and_scheduler(self, op_sc_list):
         optimizer_and_scheduler = {}
@@ -187,57 +211,31 @@ class Solver(object):
 
     def sample(self, batch, phase='train', step_type='iteration'):
         tic = time.time()
-        self.logger.log_info('Begin to sample...')
-        if self.ema is not None:
-            self.ema.modify_to_inference()
-            suffix = '_ema'
+    
+    def real_mask_recon(self, data_i, truncation_rate, guidance_scale=5.0):
+        if self.args.distributed:
+            vq_diffusion = self.vq_diffusion.module
         else:
-            suffix = ''
-        
-        if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-            model = self.model.module
-        else:  
-            model = self.model 
-            
-        with torch.no_grad(): 
-            if self.debug == False:
-                if self.args.amp:
-                    with autocast():
-                        samples = model.sample(batch=batch, step=self.last_iter)
-                else:
-                    samples = model.sample(batch=batch, step=self.last_iter)
-            else:
-                samples = model.sample(batch=batch[0].cuda(), step=self.last_iter)
+            vq_diffusion = self.vq_diffusion
 
-            step = self.last_iter if step_type == 'iteration' else self.last_epoch
-            for k, v in samples.items():
-                save_dir = os.path.join(self.image_dir, phase, k)
-                os.makedirs(save_dir, exist_ok=True)
-                save_path = os.path.join(save_dir, 'e{:010d}_itr{:010d}_rank{}{}'.format(self.last_epoch, self.last_iter%self.dataloader['train_iterations'], get_rank(), suffix))
-                if torch.is_tensor(v) and v.dim() == 4 and v.shape[1] in [1, 3]: # image
-                    im = v
-                    im = im.to(torch.uint8)
-                    self.logger.add_images(tag='{}/{}e_{}itr/{}'.format(phase, self.last_epoch, self.last_iter%self.dataloader['train_iterations'], k), img_tensor=im, global_step=step, dataformats='NCHW')
+        with torch.no_grad():
+            model_out = vq_diffusion.real_mask_return(
+                batch=data_i,
+                filter_ratio=0,
+                content_ratio=1,
+                return_att_weight=False,
+                truncation_rate=truncation_rate,
+            ) # {'t', 'changed', 'recon_token'}
 
-                    # save images
-                    im_grid = torchvision.utils.make_grid(im)
-                    im_grid = im_grid.permute(1, 2, 0).to('cpu').numpy()
-                    im_grid = Image.fromarray(im_grid)
-
-                    im_grid.save(save_path + '.jpg')
-                    self.logger.log_info('save {} to {}'.format(k, save_path+'.jpg'))
-                else: # may be other values, such as text caption
-                    with open(save_path+'.txt', 'a') as f:
-                        f.write(str(v)+'\n')
-                        f.close()
-                    self.logger.log_info('save {} to {}'.format(k, save_path+'txt'))
-        
-        if self.ema is not None:
-            self.ema.modify_to_train()
-        
-        self.logger.log_info('Sample done, time: {:.2f}'.format(time.time() - tic))
+        return model_out
 
     def step(self, batch, phase='train'):
+
+        if self.args.distributed:
+            vq_diffusion = self.vq_diffusion
+        else:
+            vq_diffusion = self.vq_diffusion.module
+
         loss = {}
         if self.debug == False: 
             for k, v in batch.items():
@@ -245,6 +243,14 @@ class Solver(object):
                     batch[k] = v.cuda()
         else:
             batch = batch[0].cuda()
+
+        with torch.no_grad():
+                vq_out = self.real_mask_recon(
+                    data_i = batch,
+                    truncation_rate = 0.86,
+                    guidance_scale = 5.0
+                )
+
         for op_sc_n, op_sc in self.optimizer_and_scheduler.items():
             if phase == 'train':
                 # check if this optimizer and scheduler is valid in this iteration and epoch
@@ -268,17 +274,17 @@ class Solver(object):
             if phase == 'train':
                 if self.args.amp:
                     with autocast():
-                        output = self.model(**input)
+                        _, output = self.model(batch['text'], vq_out)
                 else:
-                    output = self.model(**input)
+                    _, output = self.model(batch['text'], vq_out)
             else:
                 with torch.no_grad():
                     if self.args.amp:
                         with autocast():
-                            output = self.model(**input)
+                            _, output = self.model(batch['text'], vq_out)
                     else:
-                        output = self.model(**input)
-            
+                        _, output = self.model(batch['text'], vq_out)
+            output = {'loss': output, }
             if phase == 'train':
                 if op_sc['optimizer']['step_iteration'] > 0 and (self.last_iter + 1) % op_sc['optimizer']['step_iteration'] == 0:
                     op_sc['optimizer']['module'].zero_grad()
@@ -361,7 +367,7 @@ class Solver(object):
                 if not IS_ON_NSML:
                     save_path = os.path.join(self.ckpt_dir, 'last.pth')
                     torch.save(state_dict, save_path)  
-                    self.logger.log_info('saved in {}'.format(save_path))    
+                    self.logger.log_info('saved in {}'.format(save_path))     
         
     def resume(self, 
                path=None, # The path of last.pth
@@ -421,31 +427,19 @@ class Solver(object):
                                     self.optimizer_and_scheduler[op_sc_n][k][kk] = op_sc[k][kk]
                         elif load_others: # such as start_epoch, end_epoch, ....
                             self.optimizer_and_scheduler[op_sc_n][k] = op_sc[k]
+
+
+        """
+        VQ load
+        """
+        state_dict = torch.load(self.args.vq_path, map_location='cuda:{}'.format(self.args.local_rank))
+        missing, unexpected = self.vq_diffusion.module.load_state_dict(state_dict['model'])
+        print('Model missing keys:\n', missing)
+        print('Model unexpected keys:\n', unexpected)
+    
         
         self.logger.log_info('Resume from {}'.format(path))
-        
-        # CF guidance setting
-        if self.args.distributed:
-            vq_diffusion = self.model.module
-        else:
-            vq_diffusion = self.model
 
-        batch_size = self.args.batch_size
-        cf_cond_emb = vq_diffusion.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
-        def cf_predict_start(log_x_t, cond_emb, t):
-            log_x_recon = vq_diffusion.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
-            if abs(vq_diffusion.guidance_scale - 1) < 1e-3:
-                return torch.cat((log_x_recon, vq_diffusion.transformer.zero_vector), dim=1)
-            cf_log_x_recon = vq_diffusion.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
-            log_new_x_recon = cf_log_x_recon + self.args.guidance * (log_x_recon - cf_log_x_recon)
-            log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
-            log_new_x_recon = log_new_x_recon.clamp(-70, 0)
-            log_pred = torch.cat((log_new_x_recon, vq_diffusion.transformer.zero_vector), dim=1)
-            return log_pred
-        vq_diffusion.transformer.cf_predict_start = vq_diffusion.predict_start_with_truncation(cf_predict_start, ("top"+str(self.args.truncation_rate)+'r'))
-        vq_diffusion.truncation_forward = True
-        self.logger.log_info(f'CF setting finished')
-        
     
     def train_epoch(self):
         self.model.train()
@@ -503,13 +497,13 @@ class Solver(object):
             itr_start = time.time()
 
             # sample
-            if self.sample_iterations > 0 and (self.last_iter + 1) % self.sample_iterations == 0:
-                # print("save model here")
-                # self.save(force=True)
-                # print("save model done")
-                self.model.eval()
-                self.sample(batch, phase='train', step_type='iteration')
-                self.model.train()
+            # if self.sample_iterations > 0 and (self.last_iter + 1) % self.sample_iterations == 0:
+            #     # print("save model here")
+            #     # self.save(force=True)
+            #     # print("save model done")
+            #     self.model.eval()
+            #     self.sample(batch, phase='train', step_type='iteration')
+            #     self.model.train()
 
         # modify here to make sure dataloader['train_iterations'] is correct
         assert itr >= 0, "The data is too less to form one iteration!"
@@ -582,6 +576,96 @@ class Solver(object):
                         self.logger.add_scalar(tag='val/{}/{}'.format(loss_n, k), scalar_value=float(loss_dict[k]), global_step=self.last_epoch)
                 self.logger.log_info(info)
 
+    def n_t(self, t, a=0.1, b=0.2):
+        # t smaller(initial stage) -> variance bigger
+        p = t / 100 * a + b
+        return p
+
+    @torch.no_grad()
+    def generate_token_critic_for_metric(self, batch):
+        if self.args.distributed:
+            vq_diffusion = self.vq_diffusion.module
+        else:
+            vq_diffusion = self.vq_diffusion
+            
+        batch_size = len(batch['text'])
+
+        with torch.no_grad(): # condition(CLIP) -> freeze
+            condition_token = vq_diffusion.condition_codec.get_tokens(batch['text']) # BPE token
+            cond_ = {}
+            for k, v in condition_token.items():
+                v = v.to(self.device) if torch.is_tensor(v) else v
+                cond_['condition_' + k] = v
+            cond_emb = vq_diffusion.transformer.condition_emb(cond_['condition_token']).float() # CLIP condition
+            # tc_cf_cond_emb = self.empty_text_embed
+
+        zero_logits = torch.zeros((batch_size, self.num_classes-1, vq_diffusion.transformer.shape),device=self.device)
+        one_logits = torch.ones((batch_size, 1, vq_diffusion.transformer.shape),device=self.device)
+        mask_logits = torch.cat((zero_logits, one_logits), dim=1)
+        log_z = torch.log(mask_logits)
+
+        with torch.no_grad():
+            for i, (n, diffusion_index) in enumerate(zip(self.n_sample[:-1], self.time_list[:-1])): # before last step
+                # 1) VQ: 1 step reconstruction
+                t = torch.full((batch_size,), diffusion_index, device=self.device, dtype=torch.long)
+                _, log_x_recon = vq_diffusion.transformer.p_pred(log_z, cond_emb, t)
+                out = vq_diffusion.transformer.log_sample_categorical(log_x_recon) # recon -> sample -> x_0
+                out_idx = log_onehot_to_index(out) # b, 1024
+                out2_idx = torch.full_like(out_idx, self.num_classes-1).to(out_idx.device) # all mask index list
+
+                # 2) TC: Masking based on score
+                t_1 = torch.full((batch_size,), self.time_list[i+1], device=self.device, dtype=torch.long) # t-1 step
+
+                if self.args.amp:
+                    with autocast():
+                        if self.args.distributed:
+                            score = self.model.module.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=cond_emb) # b, 1024
+                            if self.args.tc_guidance != None:
+                                cf_score = self.model.module.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=self.empty_text_embed)
+                                score = cf_score + self.args.tc_guidance * (score - cf_score)
+                        else:
+                            score = self.model.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=cond_emb) # b, 1024
+                            if self.args.tc_guidance != None:
+                                cf_score = self.model.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=self.empty_text_embed)
+                                score = cf_score + self.args.tc_guidance * (score - cf_score)
+                else:
+                    if self.args.distributed:
+                        score = self.model.module.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=cond_emb) # b, 1024
+                        if self.args.tc_guidance != None:
+                            cf_score = self.model.module.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=self.empty_text_embed)
+                            score = cf_score + self.args.tc_guidance * (score - cf_score)
+                    else:
+                        score = self.model.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=cond_emb) # b, 1024
+                        if self.args.tc_guidance != None:
+                            cf_score = self.model.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=self.empty_text_embed)
+                            score = cf_score + self.args.tc_guidance * (score - cf_score)
+                                
+                score = 1 - score # (1 - score) = unchanged(sample) confidence score (because score means changed confidence)
+                score = score.clamp(min = 0) # score clamp for CF minus probability
+                score = (score - score.mean(1, keepdim=True)) * self.args.tc_weight + score.mean(1, keepdim=True)
+                score = score.clamp(min = 0)
+                if self.args.tc_det:
+                    score += self.args.tc_alpha * diffusion_index / 100 * torch.rand_like(score).to(out_idx.device)
+                else:
+                    score += self.n_t(diffusion_index, self.args.tc_a, self.args.tc_b) # n(t) for randomness
+
+                for ii in range(batch_size):
+                    if self.args.tc_det:
+                        _, sel = torch.topk(score[ii], n, dim=0) # determinisitic
+                    else:
+                        sel = torch.multinomial(score[ii], n)
+                    out2_idx[ii][sel] = out_idx[ii][sel]
+                log_z = index_to_log_onehot(out2_idx, self.num_classes)
+
+            # Final step
+            t = torch.full((batch_size,), self.time_list[-1], device=self.device, dtype=torch.long)
+            _, log_x_recon = vq_diffusion.transformer.p_pred(log_z, cond_emb, t)
+            out = vq_diffusion.transformer.log_sample_categorical(log_x_recon) # recon -> sample -> x_0
+            content_token = log_onehot_to_index(out) # b, 1024
+
+            content = vq_diffusion.content_codec.decode(content_token) 
+        return content
+
     def validate_epoch_fid(self):
         if 'validation_loader' not in self.dataloader:
             val = False
@@ -596,9 +680,10 @@ class Solver(object):
                 self.dataloader['validation_loader'].sampler.set_epoch(self.last_epoch)
 
             self.model.eval()
-            # num_batch = len(self.dataloader['validation_loader'])
-            num_batch = 625
-            
+            self.vq_diffusion.eval()
+            # num_batch = len(self.dataloader['validation_loader'])   # -> full
+            num_batch = 625                                         # 625 -> 40k, 1250 -> 80k
+
             tot_batch = []
             tot_out = []
             for itr, batch in enumerate(self.dataloader['validation_loader']):
@@ -607,40 +692,97 @@ class Solver(object):
                     break
                 batch["image"] = batch["image"].to(self.device)
                 with torch.no_grad():
-                    if self.args.amp:
-                        with autocast():
-                            if self.args.distributed:
-                                output = self.model.module.generate_content_for_metric(batch=batch, filter_ratio=0)
-                            else:
-                                output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
-                    else:
-                        if self.args.distributed:
-                            output = self.model.module.generate_content_for_metric(batch=batch, filter_ratio=0)
-                        else:
-                            output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
+                    output = self.generate_token_critic_for_metric(batch = batch)
 
                 self.fid.update(batch["image"].type(torch.uint8), real=True)
                 self.fid.update(output.type(torch.uint8), real=False)
                 if self.args.local_rank==0:
-                    print("[ ", itr, " / ", num_batch,  " ]")
+                    print("[ ", itr, " / ", num_batch, " ]")
                 del batch, output
             if self.args.local_rank==0:
                 print("computing...")
             fid_score = self.fid.compute()
-            if self.args.local_rank==0:
+            if self.args.local_rank ==0:
                 print("FID : ", float(fid_score))
                 print("FID_real samples: ", self.fid.real_features_num_samples)
                 print("FID_fake samples: ", self.fid.fake_features_num_samples)
+                
 
     def validate(self):
+        # setting for token_critic inference
+        self.vq_diffusion.module.transformer.eval()
+        self.model.module.transformer.eval()
+        if self.args.distributed:
+            vq_diffusion = self.vq_diffusion.module
+        else:
+            vq_diffusion = self.vq_diffusion
+        # print(f"empty_text_embed: {self.model.module.empty_text_embed}")
+        if self.args.tc_step == 16:
+            self.n_sample = [64] * 16
+            self.time_list = [index for index in range(100 -5, -1, -6)]
+        elif self.args.tc_step == 50:
+            self.n_sample = [10] + [21, 20] * 24 + [30]
+            self.time_list = [index for index in range(100 -1, -1, -2)]
+        else: # 100
+            self.n_sample = [1, 10] + [11, 10, 10] * 32 + [11, 11]
+            self.time_list = [index for index in range(100 -1, -1, -1)]
+
+        for s in range(1, self.args.tc_step):
+            self.n_sample[s] += self.n_sample[s-1]
+        # setting for CF_guidance vq diffusion
+
+        batch_size = self.args.batch_size
+        cf_cond_emb = self.vq_diffusion.module.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
+        def cf_predict_start(log_x_t, cond_emb, t):
+            log_x_recon = self.vq_diffusion.module.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
+            if abs(self.vq_diffusion.module.guidance_scale - 1) < 1e-3:
+                return torch.cat((log_x_recon, self.vq_diffusion.module.transformer.zero_vector), dim=1)
+            cf_log_x_recon = self.vq_diffusion.module.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
+            log_new_x_recon = cf_log_x_recon + self.args.guidance * (log_x_recon - cf_log_x_recon)
+            log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
+            log_new_x_recon = log_new_x_recon.clamp(-70, 0)
+            log_pred = torch.cat((log_new_x_recon, self.vq_diffusion.module.transformer.zero_vector), dim=1)
+            return log_pred
+        self.vq_diffusion.module.transformer.cf_predict_start = self.vq_diffusion.module.predict_start_with_truncation(cf_predict_start, ("top"+str(self.args.truncation_rate)+'r'))
+        self.vq_diffusion.module.truncation_forward = True
+        self.logger.log_info(f'CF setting finished')
+
+
+        if not self.model.module.learnable_cf: # empty embed
+            with torch.no_grad(): # condition(CLIP) -> freeze
+                condition_token = vq_diffusion.condition_codec.get_tokens([''] * self.args.batch_size) # BPE token
+                cond_ = {}
+                for k, v in condition_token.items():
+                    v = v.to(self.device) if torch.is_tensor(v) else v
+                    cond_['condition_' + k] = v
+                self.empty_text_embed = vq_diffusion.transformer.condition_emb(cond_['condition_token']).float() # CLIP cond
         self.validate_epoch_fid()
 
     def train(self):
         start_epoch = self.last_epoch + 1
         self.start_train_time = time.time()
         self.logger.log_info('{}: global rank {}: start training...'.format(self.args.name, self.args.global_rank), check_primary=False)
+        self.vq_diffusion.module.transformer.eval()
+        self.model.module.transformer.train()
+
+        batch_size = self.args.batch_size
+        cf_cond_emb = self.vq_diffusion.module.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
+        def cf_predict_start(log_x_t, cond_emb, t):
+            log_x_recon = self.vq_diffusion.module.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
+            if abs(self.vq_diffusion.module.guidance_scale - 1) < 1e-3:
+                return torch.cat((log_x_recon, self.vq_diffusion.module.transformer.zero_vector), dim=1)
+            cf_log_x_recon = self.vq_diffusion.module.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
+            log_new_x_recon = cf_log_x_recon + self.args.guidance * (log_x_recon - cf_log_x_recon)
+            log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
+            log_new_x_recon = log_new_x_recon.clamp(-70, 0)
+            log_pred = torch.cat((log_new_x_recon, self.vq_diffusion.module.transformer.zero_vector), dim=1)
+            return log_pred
+            
+        self.vq_diffusion.module.transformer.cf_predict_start = self.vq_diffusion.module.predict_start_with_truncation(cf_predict_start, ("top"+str(self.args.truncation_rate)+'r'))
+        self.vq_diffusion.module.truncation_forward = True
+        self.logger.log_info(f'CF setting finished')
         
         for epoch in range(start_epoch, self.max_epochs):
             self.train_epoch()
             self.save(force=True)
-            self.validate_epoch()
+            # self.validate_epoch()
