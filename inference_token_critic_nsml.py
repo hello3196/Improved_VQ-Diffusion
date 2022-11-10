@@ -41,6 +41,9 @@ import wandb
 from train_token_critic import Token_Critic
 from image_synthesis.utils.io import load_yaml_config
 
+import visdom
+viz = nsml.Visdom(visdom=visdom)
+
 def log_onehot_to_index(log_x):
     return log_x.argmax(1)
 
@@ -323,7 +326,7 @@ class VQ_Diffusion():
             cnt = b
             save_base_name = '{}'.format(str(cnt).zfill(6))
             im = Image.fromarray(content[b])
-            wandb.log({"result" : wandb.Image(im)})
+            # wandb.log({"result" : wandb.Image(im)})
             save_path = os.path.join(save_root_, save_base_name+'.png')
             im.save(save_path)
 
@@ -334,7 +337,7 @@ class VQ_Diffusion():
             for b in range(content.shape[0]):
                 save_base_name = str(i) + '{}'.format(str(cnt).zfill(6))
                 im = Image.fromarray(content[b])
-                wandb.log({f"{i:02d}_step recon" : wandb.Image(im)})
+                # wandb.log({f"{i:02d}_step recon" : wandb.Image(im)})
 
 
     def recon_test(self, img_root):
@@ -517,7 +520,7 @@ class VQ_Critic(nn.Module):
 
         tc_config = load_yaml_config(tc_config)
         
-        self.Token_Critic = Token_Critic(config=tc_config, learnable_cf=tc_learnable_cf)
+        self.Token_Critic = Token_Critic(config=tc_config, learnable_cf=tc_learnable_cf).cuda()
         self.tc_learnable = tc_learnable_cf
         self.device = "cuda"
         self.num_classes = self.VQ_Diffusion.model.transformer.num_classes
@@ -552,7 +555,7 @@ class VQ_Critic(nn.Module):
             df = pd.DataFrame(score_2d.to('cpu').numpy())
             fig, ax = plt.subplots(figsize = (20, 20))
             sns.heatmap(df, annot=df, fmt='.2f', cbar=False, vmin=0, vmax=1, cmap="Greys")
-            wandb.log({f"{i}_score_matrix": wandb.Image(fig)})
+            # wandb.log({f"{i}_score_matrix": wandb.Image(fig)})
             plt.close()
 
     def recon_image_log(self, out_idx): # out_idx (b, 1024)
@@ -562,7 +565,7 @@ class VQ_Critic(nn.Module):
             cnt = b
             save_base_name = '{}'.format(str(cnt).zfill(6))
             im = Image.fromarray(content[b])
-            wandb.log({f"{b:02d}_step recon" : wandb.Image(im)})
+            # wandb.log({f"{b:02d}_step recon" : wandb.Image(im)})
 
     def mask_token_log(self, out_idx): # out2_idx (b, 1024 with mask token)
         for i in range(out_idx.shape[0]):
@@ -572,7 +575,7 @@ class VQ_Critic(nn.Module):
             df = df.replace(self.num_classes - 1, -(self.num_classes - 1)) # for cmap
             fig, ax = plt.subplots(figsize = (20, 20))
             sns.heatmap(df, annot=an, cbar=False, fmt = '', vmin = -(self.num_classes - 1), vmax = self.num_classes - 1)
-            wandb.log({f"{i}_content": wandb.Image(fig)})   
+            # wandb.log({f"{i}_content": wandb.Image(fig)})   
             plt.close() 
 
     @torch.no_grad()
@@ -615,6 +618,7 @@ class VQ_Critic(nn.Module):
         # setting for VQ_Diffusion
         self.VQ_Diffusion.model.guidance_scale = vq_guidance
         self.VQ_Diffusion.model.learnable_cf = self.VQ_Diffusion.model.transformer.learnable_cf = True
+        
 
         cf_cond_emb = self.VQ_Diffusion.model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
         if self.tc_learnable: 
@@ -627,10 +631,10 @@ class VQ_Critic(nn.Module):
                 tc_cf_cond_emb = tc_cond_emb.float() # CLIP condition
 
         def cf_predict_start(log_x_t, cond_emb, t):
+            cf_log_x_recon = self.VQ_Diffusion.model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
             log_x_recon = self.VQ_Diffusion.model.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
             if abs(self.VQ_Diffusion.model.guidance_scale - 1) < 1e-3:
                 return torch.cat((log_x_recon, self.VQ_Diffusion.model.transformer.zero_vector), dim=1)
-            cf_log_x_recon = self.VQ_Diffusion.model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
      
             log_new_x_recon = cf_log_x_recon + self.VQ_Diffusion.model.guidance_scale * (log_x_recon - cf_log_x_recon)
             log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
@@ -668,6 +672,7 @@ class VQ_Critic(nn.Module):
 
                 # 1.5) VQ: attn map
                 attn_map = self.VQ_Diffusion.model.transformer.transformer.att_total
+                show_map(attn_map[0].reshape((1,1,32,32)), diffusion_index, viz)
 
                 # 2) TC: Masking based on score
                 t_1 = torch.full((batch_size,), time_list[i+1], device=device, dtype=torch.long) # t-1 step
@@ -704,6 +709,8 @@ class VQ_Critic(nn.Module):
         
         # decoding token
         content = self.VQ_Diffusion.model.content_codec.decode(content_token)
+        print(content[0])
+        show_img(content[0], 'img', viz)
         content = content.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8)
         for b in range(content.shape[0]):
             cnt = b
@@ -711,24 +718,37 @@ class VQ_Critic(nn.Module):
             im = Image.fromarray(content[b])
             save_path = os.path.join(save_root_, save_base_name+'.png')
             im.save(save_path)
-            wandb.log({"result" : wandb.Image(im)})
+            # wandb.log({"result" : wandb.Image(im)})
 
 
+def show_map(img, name, viz):
+    up = nn.Upsample(scale_factor=8, mode='nearest')
+    img = up(img)
+    img = (1-img).cpu().detach()
+    img = np.asarray(img, dtype=np.float32)
+    img = img * 255
+    img = np.rint(img).clip(0,255).astype(np.uint8)
+    viz.image(img, opts=dict(title=name, caption=name))
 
+def show_img(img, name, viz):
+    img = img.cpu().detach()
+    img = np.asarray(img, dtype=np.float32)
+    img = np.rint(img).clip(0,255).astype(np.uint8)
+    viz.image(img, opts=dict(title=name, caption=name))
 
 if __name__ == '__main__':
     model = VQ_Critic(vq='coco', tc_config='configs/token_critic.yaml', tc_learnable_cf=True)
     model.load_tc('ailab002/kaist_coco_vq/365/29')
 
     # wandb.init(project='Att test', name = 'teddy bear attn')
-    model.inference_generate_sample_with_condition(text="A picture of a teddy bear on a stone.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
+    model.inference_generate_sample_with_condition(text="Two children have a large teddy bear.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
     # wandb.finish()
 
     # wandb.init(project='Att test', name = 'cat attn')
-    model.inference_generate_sample_with_condition(text="A cat laying on a computer desk next to a laptop.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
+    model.inference_generate_sample_with_condition(text="A brown bear with two young cubs.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
     # wandb.finish()
 
     # wandb.init(project='Att test', name = 'bear attn')
-    model.inference_generate_sample_with_condition(text="Teddy bear playing in the pool", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
+    model.inference_generate_sample_with_condition(text="A kitchen area with sink and refrigerator next to closet.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
     # wandb.finish()
 

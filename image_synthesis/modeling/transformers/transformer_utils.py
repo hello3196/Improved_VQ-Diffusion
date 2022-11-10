@@ -452,12 +452,7 @@ class Text2ImageTransformer(nn.Module):
         logits = self.to_logits(emb) # B x (Ld+Lt) x n
         out = rearrange(logits, 'b l c -> b c l')
 
-        print("image printed")
         self.att_total = self.att_total.reshape((-1,1,32,32))
-        show_img(self.att_total[0].reshape((1,1,32,32)), "att", viz)
-        show_img(self.att_total[1].reshape((1,1,32,32)), "att", viz)
-        show_img(self.att_total[2].reshape((1,1,32,32)), "att", viz)
-        show_img(self.att_total[3].reshape((1,1,32,32)), "att", viz)
         return out
 
 class Condition2ImageTransformer(nn.Module):
@@ -741,12 +736,3 @@ class UnCondition2ImageTransformer(nn.Module):
         logits = self.to_logits(emb) # B x (Ld+Lt) x n
         out = rearrange(logits, 'b l c -> b c l')
         return out
-
-def show_img(img, name, viz):
-    up = nn.Upsample(scale_factor=8, mode='nearest')
-    img = up(img)
-    img = (1-img).cpu().detach()
-    img = np.asarray(img, dtype=np.float32)
-    img = img * 255
-    img = np.rint(img).clip(0,255).astype(np.uint8)
-    viz.image(img, opts=dict(title=name, caption=name))
