@@ -709,7 +709,6 @@ class VQ_Critic(nn.Module):
         
         # decoding token
         content = self.VQ_Diffusion.model.content_codec.decode(content_token)
-        print(content[0])
         show_img(content[0], 'img', viz)
         content = content.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8)
         for b in range(content.shape[0]):
@@ -723,7 +722,7 @@ class VQ_Critic(nn.Module):
 
 def show_map(img, name, viz):
     up = nn.Upsample(scale_factor=8, mode='nearest')
-    img = up(img)
+    img = up(img*13)
     img = (1-img).cpu().detach()
     img = np.asarray(img, dtype=np.float32)
     img = img * 255
