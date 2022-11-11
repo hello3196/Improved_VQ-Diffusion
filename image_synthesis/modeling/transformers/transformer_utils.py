@@ -452,7 +452,7 @@ class Text2ImageTransformer(nn.Module):
         logits = self.to_logits(emb) # B x (Ld+Lt) x n
         out = rearrange(logits, 'b l c -> b c l')
 
-        self.att_total = self.att_total.reshape((-1,1,32,32))/13
+        self.att_total /= 13
         return out
 
 class Condition2ImageTransformer(nn.Module):

@@ -532,9 +532,10 @@ class VQ_Critic(nn.Module):
         checkpoint_num = resume_info[1]
         nsml.load(checkpoint=checkpoint_num, session=session_name)
 
-    def n_t(self, t, a=0.1, b=0.2):
+    def n_t(self, t, attn_map, a=0.1, b=0.2):
         # t smaller(initial stage) -> variance bigger
-        p = t / 100 * a + b
+        # p = t / 100 * a + b
+        p = (50-t)/100 * attn_map * 0.1 + t/100*a + b
         return p
 
     @torch.no_grad()
@@ -681,8 +682,9 @@ class VQ_Critic(nn.Module):
                     cf_score = self.Token_Critic.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=tc_cf_cond_emb)
                     score = cf_score + tc_guidance * (score - cf_score)
                 score = 1 - score # (1 - score) = unchanged(sample) confidence score (because score means changed confidence)
+                score += self.n_t(diffusion_index, attn_map, a, b) # n(t) for randomness
 
-                score += self.n_t(diffusion_index, a, b) # n(t) for randomness
+                score[score<0] = 0
                 # score *= 2 # weight sampling
 
                 for ii in range(batch_size):
@@ -739,15 +741,12 @@ if __name__ == '__main__':
     model = VQ_Critic(vq='coco', tc_config='configs/token_critic.yaml', tc_learnable_cf=True)
     model.load_tc('ailab002/kaist_coco_vq/365/29')
 
-    # wandb.init(project='Att test', name = 'teddy bear attn')
-    model.inference_generate_sample_with_condition(text="Two children have a large teddy bear.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
-    # wandb.finish()
+    model.inference_generate_sample_with_condition(text="A teddy bear playing in the pool.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
+    # model.inference_generate_sample_with_condition(text="Two children have a large teddy bear.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
 
-    # wandb.init(project='Att test', name = 'cat attn')
-    model.inference_generate_sample_with_condition(text="A brown bear with two young cubs.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
-    # wandb.finish()
+    model.inference_generate_sample_with_condition(text="A picture of a teddy bear on a stone.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
+    # model.inference_generate_sample_with_condition(text="A brown bear with two young cubs.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
 
-    # wandb.init(project='Att test', name = 'bear attn')
-    model.inference_generate_sample_with_condition(text="A kitchen area with sink and refrigerator next to closet.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
-    # wandb.finish()
+    model.inference_generate_sample_with_condition(text="A cat laying on a computer desk next to a laptop.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
+    # model.inference_generate_sample_with_condition(text="A kitchen area with sink and refrigerator next to closet.", batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='s,r,t', a=0, b=0) # s: score, r: recon image, t: token matrix
 
