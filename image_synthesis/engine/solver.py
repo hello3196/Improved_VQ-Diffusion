@@ -23,6 +23,7 @@ from image_synthesis.engine.lr_scheduler import ReduceLROnPlateauWithWarmup, Cos
 from image_synthesis.engine.ema import EMA
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 from torchmetrics.image.fid import FrechetInceptionDistance
+import image_synthesis.modeling.modules.clip.clip as clip
 try:
     from torch.cuda.amp import autocast, GradScaler
     AMP = True
@@ -632,8 +633,69 @@ class Solver(object):
                 print("FID_real samples: ", self.fid.real_features_num_samples)
                 print("FID_fake samples: ", self.fid.fake_features_num_samples)
 
+    def validate_epoch_clip(self):
+        if 'validation_loader' not in self.dataloader:
+            val = False
+        else:
+            if isinstance(self.validation_epochs, int):
+                val = (self.last_epoch + 1) % self.validation_epochs == 0
+            else:
+                val = (self.last_epoch + 1) in self.validation_epochs        
+        
+        if val:
+            if self.args.distributed:
+                self.dataloader['validation_loader'].sampler.set_epoch(self.last_epoch)
+
+            self.model.eval()
+            # num_batch = len(self.dataloader['validation_loader'])
+            num_batch = 10
+            
+            tot_batch = []
+            tot_out = []
+            sim = []
+
+            device = "cuda"
+            CLIP, _ = clip.load("ViT-B/32", device=device, jit=False)
+            mean=(0.48145466, 0.4578275, 0.40821073)
+            std=(0.26862954, 0.26130258, 0.27577711)
+
+            for itr, batch in enumerate(self.dataloader['validation_loader']):
+                if itr==num_batch:
+                    del batch
+                    break
+                batch["image"] = batch["image"].to(self.device)
+                with torch.no_grad():
+                    if self.args.amp:
+                        with autocast():
+                            if self.args.distributed:
+                                output = self.model.module.generate_content_for_metric(batch=batch, filter_ratio=0)
+                            else:
+                                output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
+                    else:
+                        if self.args.distributed:
+                            output = self.model.module.generate_content_for_metric(batch=batch, filter_ratio=0)
+                        else:
+                            output = self.model.generate_content_for_metric(batch=batch, filter_ratio=0)
+
+                txt = clip.tokenize(batch["text"])['token'].cuda()
+                txt_ft = CLIP.encode_text(txt)
+                txt_ft = F.normalize(txt_ft)
+
+                output = F.interpolate(output, size=(224,224), mode='area') / 255.
+                output = torchvision.transforms.Normalize(mean, std)(output)
+                img_ft = CLIP.encode_image(output)
+                img_ft = F.normalize(img_ft)
+
+                sim.append(F.cosine_similarity(txt_ft, img_ft, dim=-1))
+                del batch, output
+            sim = torch.stack(sim, dim=1)
+            clip_score = torch.mean(sim)
+            if self.args.local_rank==0:
+                print("CLIP SCORE : ", clip_score)
+
     def validate(self):
-        self.validate_epoch_fid()
+        #self.validate_epoch_fid()
+        self.validate_epoch_clip()
 
     def train(self):
         start_epoch = self.last_epoch + 1
