@@ -61,10 +61,11 @@ class VQ_Critic(nn.Module):
             self.VQ_Diffusion = VQ_Diffusion(config='configs/ithq.yaml', path='OUTPUT/pretrained_model/ithq_learnable.pth')
         
         self.Token_Critic = Token_Critic(config=tc_config, learnable_cf=tc_learnable_cf)
+        self.Expert = Token_Critic(config=tc_config, learnable_cf=tc_learnable_cf)
         self.device = "cuda"
         self.num_classes = self.VQ_Diffusion.model.transformer.num_classes
 
-    def load_tc(self, ckpt_path):
+    def load_tc(self, ckpt_path, expert_path):
         checkpoint = torch.load(ckpt_path)
         # checkpoint["Model"]
         print('Token Critic Load from', ckpt_path)
@@ -76,7 +77,14 @@ class VQ_Critic(nn.Module):
         self.Token_Critic.empty_text_embed = torch.load('cf_emb.pth').cuda()
         print("cf_emb load")
 
+        checkpoint = torch.load(expert_path)
+        print('Token Critic Load from', expert_path)
+        missing, unexpected = self.Expert.load_state_dict(checkpoint["model"], strict=False)
+        print('Model missing keys:\n', missing)
+        print('Model unexpected keys:\n', unexpected)  
+
         self.Token_Critic.eval()
+        self.Expert.eval()
         
 
     def n_t(self, t, a=0.1, b=0.2):
@@ -113,28 +121,6 @@ class VQ_Critic(nn.Module):
             sns.heatmap(df, annot=df, fmt='.2f', cbar=False, vmin=0, vmax=1, cmap="Greys")
             wandb.log({f"{i:02d}_attn_map": wandb.Image(fig)})
             plt.close()
-
-    def word_attn_log(self, score, word_list): # score (b, w, 1024)
-        for i in range(score.shape[0]):
-            for j in range(score.shape[1]):
-                score_2d = score[i][j].view(32, 32)
-                df = pd.DataFrame(score_2d.to('cpu').numpy())
-                fig, ax = plt.subplots(figsize = (20, 20))
-                sns.heatmap(df, annot=df, fmt='.2f', cbar=False, vmin=0, vmax=1, cmap="Greys")
-                wandb.log({f"{i:02d}b_{word_list[j]}_word_attn_map": wandb.Image(fig)})
-                plt.close()    
-
-    def word_attn_log_v2(self, score, word_list): # score (b, w, 1024)
-        # for i in range(score.shape[0]):
-        for i in range(1):
-            for j in range(score.shape[1]):
-                for b in range(score.shape[2]):
-                    score_2d = score[i][j][b].view(32, 32)
-                    df = pd.DataFrame(score_2d.to('cpu').numpy())
-                    fig, ax = plt.subplots(figsize = (20, 20))
-                    sns.heatmap(df, annot=df, fmt='.2f', cbar=False, vmin=0, vmax=1, cmap="Greys")
-                    wandb.log({f"{i:02d}_{word_list[j]}_{b:02d}b_word_attn_map": wandb.Image(fig)})
-                    plt.close()
 
     def score_matrix_log_tc(self, score): # score (b, 1024)
         for i in range(score.shape[0]):
@@ -383,6 +369,7 @@ class VQ_Critic(nn.Module):
 
         # iterate decoding step
         self.token_critic_on = token_critic
+
         with torch.no_grad():
             for i, (n, diffusion_index) in tqdm(enumerate(zip(n_sample[:-1], time_list[:-1]))): # before last step
                 # schedule test => 앞부분 tc, 뒷부분 random
@@ -404,15 +391,21 @@ class VQ_Critic(nn.Module):
                     attn_map /= (attn_map.max(dim=1, keepdim=True).values + 1e-10)
                     attn_map -= attn_map.min(dim=1, keepdim=True).values
                     attn_map *= attn_weight
-                
+
                 # 2) TC: Masking based on score
                 t_1 = torch.full((batch_size,), time_list[i+1], device=device, dtype=torch.long) # t-1 step
 
                 if self.token_critic_on == True:
                     print(f"Token_Critic step i={i}")
-                    score = self.Token_Critic.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=cond_emb) # b, 1024
+                    if diffusion_index < 75:
+                        model = self.Token_Critic
+                        print("Normal Token Critic step")
+                    else:
+                        model = self.Expert
+                        print("Expert step")
+                    score = model.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=cond_emb) # b, 1024
                     if tc_guidance != None:
-                        cf_score = self.Token_Critic.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=tc_cf_cond_emb)
+                        cf_score = model.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=tc_cf_cond_emb)
                         score = cf_score + tc_guidance * (score - cf_score)
                     score = 1 - score # (1 - score) = unchanged(sample) confidence score (because score means changed confidence)
                     score = score.clamp(min = 0) # score clamp for CF minus probability
@@ -1506,213 +1499,17 @@ class VQ_Critic(nn.Module):
             im.save(save_path)
             wandb.log({"result" : wandb.Image(im)})
 
-    @torch.no_grad()
-    def word_attention_test(self, text, word_list, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log="s,t,r", a=0., b=0., score_weight = 1., attn_weight = None, token_critic=True, gaussian_alpha = 1.):
-        """
-        step: 16, 50, 100
-
-        prepare condition: text -> tokenize -> CLIP -> cond_emb
-        initialize: All mask
-        
-        iterate decoding step:
-            1) VQ: 1 step reconstruction
-            2) TC: Masking based on score
-        """
-        log_set = wandb_log.split(',')
-        save_root = 'RESULT'
-        os.makedirs(save_root, exist_ok=True)
-        str_cond = str(text) + '_' + str(step)
-        save_root_ = os.path.join(save_root, str_cond)
-        os.makedirs(save_root_, exist_ok=True)
-
-        # masking list & Diffusion time step
-        if step == 16:
-            n_sample = [64] * 16
-            time_list = [index for index in range(100 -5, -1, -6)]
-        elif step == 50:
-            n_sample = [10] + [21, 20] * 24 + [30]
-            time_list = [index for index in range(100 -1, -1, -2)]
-        else: # 100
-            n_sample = [1, 10] + [11, 10, 10] * 32 + [11, 11]
-            time_list = [index for index in range(100 -1, -1, -1)]
-
-        n_mask = []
-        for s in range(1, step):
-            n_sample[s] += n_sample[s-1]
-        for s in range(step):
-            n_mask.append(1024 - n_sample[s]) # the number of masking tokens each step
-
-        
-        # setting for VQ_Diffusion
-        self.VQ_Diffusion.model.guidance_scale = vq_guidance
-        self.VQ_Diffusion.model.learnable_cf = self.VQ_Diffusion.model.transformer.learnable_cf = True
-
-        cf_cond_emb = self.VQ_Diffusion.model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
-        if self.tc_learnable: 
-            tc_cf_cond_emb = self.Token_Critic.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1).float()
-        else:
-            none_text = [''] * batch_size
-            condition_token = self.prepare_condition(none_text) # BPE token
-            with torch.no_grad(): # condition(CLIP) -> freeze
-                tc_cond_emb = self.VQ_Diffusion.model.transformer.condition_emb(condition_token['condition_token']) # B x Ld x D   256*1024
-                tc_cf_cond_emb = tc_cond_emb.float() # CLIP condition
-
-        def cf_predict_start(log_x_t, cond_emb, t):
-            cf_log_x_recon = self.VQ_Diffusion.model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
-            if abs(self.VQ_Diffusion.model.guidance_scale - 1) < 1e-3:
-                return torch.cat((log_x_recon, self.VQ_Diffusion.model.transformer.zero_vector), dim=1)
-            log_x_recon = self.VQ_Diffusion.model.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]         
-            log_new_x_recon = cf_log_x_recon + self.VQ_Diffusion.model.guidance_scale * (log_x_recon - cf_log_x_recon)
-            log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
-            log_new_x_recon = log_new_x_recon.clamp(-70, 0)
-            log_pred = torch.cat((log_new_x_recon, self.VQ_Diffusion.model.transformer.zero_vector), dim=1)
-            return log_pred
-
-        sample_type = "top"+str(vq_tr)+'r'
-        self.VQ_Diffusion.model.transformer.cf_predict_start = self.VQ_Diffusion.model.predict_start_with_truncation(cf_predict_start, sample_type.split(',')[0])
-        self.VQ_Diffusion.model.truncation_forward = False
-
-        # prepare condition: text -> tokenize -> CLIP -> cond_emb
-        text_list = [text] * batch_size
-        condition_token = self.prepare_condition(text_list) # BPE token
-        with torch.no_grad(): # condition(CLIP) -> freeze
-            cond_emb = self.VQ_Diffusion.model.transformer.condition_emb(condition_token['condition_token']) # B x Ld x D   256*1024
-            cond_emb = cond_emb.float().unsqueeze(1) # CLIP condition => 4, 1, 77, 512
-        
-
-        for w in word_list:
-            word = [w] * batch_size
-            w_condition_token = self.prepare_condition(word) # BPE token
-            with torch.no_grad(): # condition(CLIP) -> freeze
-                w_cond_emb = self.VQ_Diffusion.model.transformer.condition_emb(w_condition_token['condition_token']) # B x Ld x D   256*1024
-                w_cond_emb = w_cond_emb.float().unsqueeze(1) # CLIP condition => 4, 1, 77, 512
-            cond_emb = torch.concat((cond_emb, w_cond_emb), 1)
-            
-
-        # initialize: All mask 
-        device = self.device
-        zero_logits = torch.zeros((batch_size, self.num_classes-1, self.VQ_Diffusion.model.transformer.shape),device=device)
-        one_logits = torch.ones((batch_size, 1, self.VQ_Diffusion.model.transformer.shape),device=device)
-        mask_logits = torch.cat((zero_logits, one_logits), dim=1)
-        log_z = torch.log(mask_logits)
-
-        # iterate decoding step
-        self.token_critic_on = token_critic
-        
-        with torch.no_grad():
-            for i, (n, diffusion_index) in tqdm(enumerate(zip(n_sample[:-1], time_list[:-1]))): # before last step
-                # schedule test => 앞부분 tc, 뒷부분 random
-                # if i > step / 2:
-                #     self.token_critic_on = True
-                # else:
-                #     self.token_critic_on = False
-
-                # 1) VQ: 1 step reconstruction
-                t = torch.full((batch_size,), diffusion_index, device=device, dtype=torch.long)
-                _, log_x_recon = self.VQ_Diffusion.model.transformer.p_pred(log_z, cond_emb, t)
-                out = self.VQ_Diffusion.model.transformer.log_sample_categorical(log_x_recon) # recon -> sample -> x_0
-                out_idx = log_onehot_to_index(out) # b, 1024
-                out2_idx = torch.full_like(out_idx, self.num_classes-1).to(out_idx.device) # all mask index list
-                    
-                # print(f"word attention map shape: {self.VQ_Diffusion.model.transformer.transformer.att_total.shape}")
-                # self.attn_matrix_log(self.VQ_Diffusion.model.transformer.transformer.att_total)
-
-                # attn_map = self.VQ_Diffusion.model.transformer.transformer.att_total
-                # attn_map /= (attn_map.max(dim=2, keepdim=True).values + 1e-10)
-                # attn_map -= attn_map.min(dim=2, keepdim=True).values
-                # self.word_attn_log(attn_map * 3, word_list)
-
-                # each block version
-                attn_map = self.VQ_Diffusion.model.transformer.transformer.att_total # b, w, 13, 1024
-                attn_map /= (attn_map.max(dim=3, keepdim=True).values + 1e-10)
-                attn_map -= attn_map.min(dim=3, keepdim=True).values
-                self.word_attn_log_v2(attn_map * 3, word_list)
-
-                # 2) TC: Masking based on score
-                t_1 = torch.full((batch_size,), time_list[i+1], device=device, dtype=torch.long) # t-1 step
-
-                if self.token_critic_on == True:
-                    print(f"Token_Critic step i={i}")
-                    score = self.Token_Critic.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=cond_emb[:,0]) # b, 1024
-                    if tc_guidance != None:
-                        cf_score = self.Token_Critic.inference_score(input={'t': t_1, 'recon_token': out_idx}, cond_emb=tc_cf_cond_emb)
-                        score = cf_score + tc_guidance * (score - cf_score)
-                    score = 1 - score # (1 - score) = unchanged(sample) confidence score (because score means changed confidence)
-                    score = score.clamp(min = 0) # score clamp for CF minus probability
-                    # score = score * score_weight
-                    score = (score - score.mean(1, keepdim=True)) * score_weight + score.mean(1, keepdim=True)
-                    score = score.clamp(min = 0)
-                    score += self.n_t(diffusion_index, a, b) # n(t) for randomness
-                    score += gaussian_alpha * diffusion_index / 100 * torch.rand_like(score).to(out_idx.device)
-                    if attn_weight != None:
-                        print("with attn")
-                        score += (diffusion_index - 0) / 100 * attn_map
-                        # if i < step / 2: # front
-                        #     score *= (diffusion_index) / 100 * attn_map 
-                        # else:
-                        #     score *= (diffusion_index) / 100 * (attn_map.max(1, keepdim=True).values - attn_map)
-
-                else: # token_critic False
-                    print(f"Random step i={i}")
-                    score = torch.zeros_like(out_idx).float().cuda()
-                    score += gaussian_alpha * diffusion_index / 100 * torch.rand_like(score).to(out_idx.device)
-                    if attn_weight != None:
-                        print("with attn")
-                        score += diffusion_index / 100 * attn_map
-
-
-                for ii in range(batch_size):
-                    # sel = torch.multinomial(score[ii], n)
-                    _, sel = torch.topk(score[ii], n, dim=0) # determinisitic
-                    out2_idx[ii][sel] = out_idx[ii][sel]
-                log_z = index_to_log_onehot(out2_idx, self.num_classes)
-
-                # log
-                if 'a' in log_set:
-                    if attn_weight != None:
-                        self.attn_matrix_log(attn_map)
-                if 's' in log_set:
-                    self.score_matrix_log(score)
-                if 'r' in log_set:
-                    self.recon_image_log(out_idx)
-                if 't' in log_set:
-                    self.mask_token_log(out2_idx)
-
-            # Final step
-            t = torch.full((batch_size,), time_list[-1], device=device, dtype=torch.long)
-            _, log_x_recon = self.VQ_Diffusion.model.transformer.p_pred(log_z, cond_emb[:,0], t)
-            out = self.VQ_Diffusion.model.transformer.log_sample_categorical(log_x_recon) # recon -> sample -> x_0
-            content_token = log_onehot_to_index(out) # b, 1024
-
-            if 't' in log_set:
-                self.mask_token_log(content_token)
-        
-        # decoding token
-        content = self.VQ_Diffusion.model.content_codec.decode(content_token)
-        content = content.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8)
-        for b in range(content.shape[0]):
-            cnt = b
-            save_base_name = '{}'.format(str(cnt).zfill(6))
-            im = Image.fromarray(content[b])
-            save_path = os.path.join(save_root_, save_base_name+'.png')
-            im.save(save_path)
-            wandb.log({"result" : wandb.Image(im)})
 
 
 if __name__ == '__main__':
     model = VQ_Critic(vq='coco', tc_config='configs/token_critic.yaml', tc_learnable_cf=False)
-    model.load_tc('/content/drive/MyDrive/VQ/Improved_VQ-Diffusion/tc_ckpt/685_33.pth')
+    model.load_tc('/content/drive/MyDrive/VQ/Improved_VQ-Diffusion/tc_ckpt/841_21.pth', expert_path='/content/drive/MyDrive/VQ/Improved_VQ-Diffusion/tc_ckpt/885_15.pth')
     
     # text = "A bear walking down a rocky mountain side."
     # text2 = "A sheep walking down a rocky mountain side."
     # wandb.init(project='eDiff_test', name=text+text2)
     # wandb.finish()
-    text = "A bear walking down a rocky mountain side."
-    w_list = ['A bear', 'rocky mountain side', "A bear walking down a rocky mountain side."]
 
-    wandb.init(project='1201_wordtest', name=text)
-    model.word_attention_test(text=text, word_list = w_list, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=3, step=16, wandb_log='r', a=0, b=0, gaussian_alpha = 2., attn_weight = None)
-    wandb.finish()
     # for step in range(1,16):
     #     wandb.init(project='eDiff_test', name=str(step))
     #     model.ediff_test(text=text, text2 = text2, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=9., step=16, wandb_log='r', a=0, b=0, score_weight=1., purity=False, start_step=step)
@@ -1808,57 +1605,56 @@ if __name__ == '__main__':
     # model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=3, step=16, wandb_log='',a=0, b=0)
     # wandb.finish()
     
-    # texts = ['a bicycle replica with a clock as the front wheel.', 'a black honda motorcycle parked in front of a garage.', 
-    # 'a room with blue walls and a white sink and door.', 'a car that seems to be parked illegally behind a legally parked car', 'a large passenger airplane flying through the air.', 'there is a gol plane taking off in a partly cloudy sky.',
-    # 'blue and white color scheme in a small bathroom.', 'this is a blue and white bathroom with a wall sink and a lifesaver on the wall.', 'a blue boat themed bathroom with a life preserver on the wall', 'the bike has a clock as a tire.',
-    # 'a honda motorcycle parked in a grass driveway', 'two cars parked on the sidewalk on the street', 'an airplane that is, either, landing or just taking off.']
+    texts = ['a black honda motorcycle parked in front of a garage.', 
+    'a room with blue walls and a white sink and door.', 'a car that seems to be parked illegally behind a legally parked car', 'the bike has a clock as a tire.',
+    'a honda motorcycle parked in a grass driveway', 'two cars parked on the sidewalk on the street', 'an airplane that is, either, landing or just taking off.']
     # texts = ['A teddy bear and a very old sewing machine are shown.', 'A slice of pizza on a plate sitting on a table', 'A teddy bear playing in the pool',
     # "A black bear walking down a rocky mountain side.", "a close up of a person jumping skis in the air", "A group of people competing in a cross country skiing race.", "The colorful roses are in a clear glass jar."]
 
     # wandb.init(project='1128', name ='_1128_det_attn_decrease_to_minus0_w')
     # # wandb.finish()
     # texts = ['A teddy bear playing in the pool', 'A black bear walking down a rocky mountain side', 'A living room with a white sofa and colorful throw pillows']
-    # # # project_ = '1128_decrease_to_minus0_w5_multiply'
-    # # # project_ = '1128_w5_multiply_decrease'_4
-    # project_ = '1130'
-    # for text in texts:
+    # # project_ = '1128_decrease_to_minus0_w5_multiply'
+    # # project_ = '1128_w5_multiply_decrease'_4
+    project_ = '1130-expert'
+    for text in texts:
         
-    # # # text = 'a car that seems to be parked illegally behind a legally parked car'
-    #     wandb.init(project=project_, name = '841_21_alpha20')
-    #     wandb.finish()
+    # # text = 'a car that seems to be parked illegally behind a legally parked car'
+        wandb.init(project=project_, name = '841_21_with_Expert_885_15')
+        wandb.finish()
 
-    #     # wandb.init(project='1128', name = '16_00_0_a0')
-    #     # model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='',a=0, b=0, gaussian_alpha = 0, attn_weight = 3)
-    #     # wandb.finish()
+        # wandb.init(project='1128', name = '16_00_0_a0')
+        # model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='',a=0, b=0, gaussian_alpha = 0, attn_weight = 3)
+        # wandb.finish()
 
-    #     # wandb.init(project=project_, name = '16_00_0_a1')
-    #     # model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='',a=0, b=0, gaussian_alpha = 1., )
-    #     # wandb.finish()
+        # wandb.init(project=project_, name = '16_00_0_a1')
+        # model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='',a=0, b=0, gaussian_alpha = 1., )
+        # wandb.finish()
 
-    #     # wandb.init(project=project_, name = '16_00_0_a2')
-    #     # model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='',a=0, b=0, gaussian_alpha = 2., )
-    #     # wandb.finish()
+        # wandb.init(project=project_, name = '16_00_0_a2')
+        # model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='',a=0, b=0, gaussian_alpha = 2., )
+        # wandb.finish()
 
-    #     # wandb.init(project=project_, name = '16_00_0_a3')
-    #     # model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='',a=0, b=0, gaussian_alpha = 3.,)
-    #     # wandb.finish()
+        # wandb.init(project=project_, name = '16_00_0_a3')
+        # model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=None, step=16, wandb_log='',a=0, b=0, gaussian_alpha = 3.,)
+        # wandb.finish()
 
 
-    #     # wandb.init(project=project_, name = '16_00_3_a1')
-    #     # model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=3, step=16, wandb_log='',a=0, b=0, gaussian_alpha = 1., )
-    #     # wandb.finish()
+        # wandb.init(project=project_, name = '16_00_3_a1')
+        # model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=3, step=16, wandb_log='',a=0, b=0, gaussian_alpha = 1., )
+        # wandb.finish()
 
-    #     wandb.init(project=project_, name = '16_00_tcg3_a2_aw3_-0')
-    #     model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=3, step=16, wandb_log='r', a=0, b=0, gaussian_alpha = 2., attn_weight = 3)
-    #     wandb.finish()
+        wandb.init(project=project_, name = '16_00_tcg3_a2_aw3_-0')
+        model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=3, step=16, wandb_log='r', a=0, b=0, gaussian_alpha = 2., attn_weight = 3)
+        wandb.finish()
 
-    #     wandb.init(project=project_, name = '50_00_tcg3_a2_aw3_-0')
-    #     model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=3, step=50, wandb_log='r', a=0, b=0, gaussian_alpha = 2., attn_weight = 3)
-    #     wandb.finish()
+        wandb.init(project=project_, name = '50_00_tcg3_a2_aw3_-0')
+        model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=3, step=50, wandb_log='r', a=0, b=0, gaussian_alpha = 2., attn_weight = 3)
+        wandb.finish()
 
-    #     wandb.init(project=project_, name = '100_00_tcg3_a2_aw3_-0')
-    #     model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=3, step=100, wandb_log='r', a=0, b=0, gaussian_alpha = 2., attn_weight = 3)
-    #     wandb.finish()
+        wandb.init(project=project_, name = '100_00_tcg3_a2_aw3_-0')
+        model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=3, step=100, wandb_log='r', a=0, b=0, gaussian_alpha = 2., attn_weight = 3)
+        wandb.finish()
 
         # wandb.init(project=project_, name = '16_00_3_a3')
         # model.inference_generate_sample_with_condition(text=text, batch_size=4, vq_guidance=5.0, vq_tr=0.86, tc_guidance=3, step=16, wandb_log='',a=0, b=0, gaussian_alpha = 3., )

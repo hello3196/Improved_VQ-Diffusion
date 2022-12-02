@@ -299,7 +299,8 @@ class DALLE(nn.Module):
             condition_token = condition['condition_token'],
             real_token = img_token
             ) 
-
+        # temp real token
+        trans_out['gt'] = img_token
         # img_token = self.content_codec.decode(img_token)
 
         # self.train()

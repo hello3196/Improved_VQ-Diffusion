@@ -19,6 +19,10 @@ from inspect import isfunction
 from torch.cuda.amp import autocast
 from torch.utils.checkpoint import checkpoint
 
+# import visdom
+# import nsml
+# viz = nsml.Visdom(visdom=visdom)
+
 class FullAttention(nn.Module):
     def __init__(self,
                  n_embd, # the embed dim
@@ -92,23 +96,59 @@ class CrossAttention(nn.Module):
 
     def forward(self, x, encoder_output, mask=None):
         B, T, C = x.size()
-        B, T_E, _ = encoder_output.size()
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        k = self.key(encoder_output).view(B, T_E, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = self.query(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = self.value(encoder_output).view(B, T_E, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        
+        if encoder_output.dim() == 4: # word attention
+            att_word_list = []
+            B, w, T_E, _ = encoder_output.size() # B, word+1, T_E, _
+            
+            # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+            k = self.key(encoder_output[:, 0]).view(B, T_E, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+            q = self.query(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+            v = self.value(encoder_output[:, 0]).view(B, T_E, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, T)
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, T)
 
-        att = F.softmax(att, dim=-1) # (B, nh, T, T)
-        att = self.attn_drop(att)
-        y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side, (B, T, C)
-        att = att.mean(dim=1, keepdim=False) # (B, T, T)
+            for i in range(1, w):
+                k_word = self.key(encoder_output[:, i]).view(B, T_E, self.n_head, C // self.n_head).transpose(1, 2)
+                att_word = (q @ k_word.transpose(-2, -1)) * (1.0 / math.sqrt(k_word.size(-1)))
+                att_word = F.sigmoid(att_word)
+                att_word = att_word.mean(dim=1, keepdim=False) # (B, T, T_E)
+                att_word = att_word.mean(dim=-1, keepdim=False) # (B, T)
+                att_word_list.append(att_word)
+            att_word_list = torch.stack(att_word_list, 1) # (B, w, T)
 
-        # output projection
-        y = self.resid_drop(self.proj(y))
-        return y, att
+            att = F.softmax(att, dim=-1) # (B, nh, T, T)
+            att = self.attn_drop(att)
+            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side, (B, T, C)
+            att = att.mean(dim=1, keepdim=False) # (B, T, T)
+
+            # output projection
+            y = self.resid_drop(self.proj(y))
+            return y, att_word_list
+
+        else: # 3 -> normal
+            B, T_E, _ = encoder_output.size()
+            # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+            k = self.key(encoder_output).view(B, T_E, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+            q = self.query(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+            v = self.value(encoder_output).view(B, T_E, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, nh, T, T)
+
+            att2 = F.sigmoid(att)
+            att2 = att2.mean(dim=1, keepdim=False) # (B, T, T_E)
+            att2 = att2.mean(dim=-1, keepdim=False) # (B, T)
+
+            att = F.softmax(att, dim=-1) # (B, nh, T, T)
+            att = self.attn_drop(att)
+            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side, (B, T, C)
+            att = att.mean(dim=1, keepdim=False) # (B, T, T)
+
+            # output projection
+            y = self.resid_drop(self.proj(y))
+            return y, att2
 
 class GELU2(nn.Module):
     def __init__(self):
@@ -318,6 +358,8 @@ class Text2ImageTransformer(nn.Module):
 
         self.use_checkpoint = checkpoint
         self.content_emb = instantiate_from_config(content_emb_config)
+        
+        self.att_total = None
 
         # transformer
         assert attn_type == 'selfcross'
@@ -430,15 +472,39 @@ class Text2ImageTransformer(nn.Module):
             t):
         cont_emb = self.content_emb(input)
         emb = cont_emb
+        if cond_emb.dim() == 3:
+            self.att_total = torch.zeros((emb.shape[0], 1024)).cuda()
 
-        for block_idx in range(len(self.blocks)):   
-            if self.use_checkpoint == False:
-                emb, att_weight = self.blocks[block_idx](emb, cond_emb, t.cuda()) # B x (Ld+Lt) x D, B x (Ld+Lt) x (Ld+Lt)
-            else:
-                emb, att_weight = checkpoint(self.blocks[block_idx], emb, cond_emb, t.cuda())
-        logits = self.to_logits(emb) # B x (Ld+Lt) x n
-        out = rearrange(logits, 'b l c -> b c l')
-        return out
+            for block_idx in range(len(self.blocks)):   
+                if self.use_checkpoint == False:
+                    emb, att_weight = self.blocks[block_idx](emb, cond_emb, t.cuda()) # B x (Ld+Lt) x D, B x (Ld+Lt) x (Ld+Lt)
+                    if block_idx < 13:
+                        self.att_total += att_weight
+                else:
+                    emb, att_weight = checkpoint(self.blocks[block_idx], emb, cond_emb, t.cuda())
+            logits = self.to_logits(emb) # B x (Ld+Lt) x n
+            out = rearrange(logits, 'b l c -> b c l')
+
+            self.att_total /= 13
+            return out
+        else: #  for word attention / cond_emb shape: (4, w+1, 77, 512)
+            # self.att_total = torch.zeros((cond_emb.shape[0], cond_emb.shape[1]-1, 1024)).cuda()
+            self.att_total = []
+            for block_idx in range(len(self.blocks)):   
+                if self.use_checkpoint == False:
+                    emb, att_weight = self.blocks[block_idx](emb, cond_emb, t.cuda()) # B x (Ld+Lt) x D, B x (Ld+Lt) x (Ld+Lt)
+                    # if block_idx < 13:
+                    #     print(f"block_idx: {block_idx} / att_total: {self.att_total.shape} / att_weight: {att_weight.shape}")
+                    #     self.att_total += att_weight
+                    self.att_total.append(att_weight)
+                else:
+                    emb, att_weight = checkpoint(self.blocks[block_idx], emb, cond_emb, t.cuda())
+            logits = self.to_logits(emb) # B x (Ld+Lt) x n
+            out = rearrange(logits, 'b l c -> b c l')
+
+            # self.att_total /= 13 # b, w, 1024
+            self.att_total = torch.stack(self.att_total, 2) # b, w, 13, 1024
+            return out
 
 class Condition2ImageTransformer(nn.Module):
     def __init__(

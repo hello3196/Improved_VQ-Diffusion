@@ -602,6 +602,13 @@ class DiffusionTransformer(nn.Module):
         log_sample = index_to_log_onehot(sample, self.num_classes)
         return log_sample
 
+    def log_sample_categorical2(self, logits, weight=1.):           # use gumbel to sample onehot vector from log probability
+        uniform = torch.rand_like(logits) * weight
+        gumbel_noise = -torch.log(-torch.log(uniform + 1e-30) + 1e-30)
+        sample = (gumbel_noise + logits).argmax(dim=1)
+        log_sample = index_to_log_onehot(sample, self.num_classes)
+        return log_sample
+
     def log_sample_categorical_prob(self, logits):           # use gumbel to sample onehot vector from log probability with corresponding probability
         uniform = torch.rand_like(logits)
         logits_reg = logits.softmax(dim=1)
@@ -1153,7 +1160,7 @@ class DiffusionTransformer(nn.Module):
         cond_emb = cond_emb.float()
 
         # time sampling
-        t, pt = self.sample_time(batch_size, device, 'importance')
+        t = torch.randint(66, self.num_timesteps, (batch_size,), device=device).long()
         # real_token -> masking & finding changed location
         real_token = index_to_log_onehot(input['real_token'], self.num_classes) # b, 4096, 1024
         log_xt = self.q_sample(log_x_start=real_token, t=t) # noised token with random t, log p form

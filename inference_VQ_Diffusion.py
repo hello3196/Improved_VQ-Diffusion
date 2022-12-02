@@ -16,7 +16,7 @@ import torch.nn.functional as F
 import argparse
 import numpy as np
 import torchvision
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 import scipy.linalg
@@ -189,6 +189,7 @@ class VQ_Diffusion():
             else:
                 save_path = os.path.join(save_root_, save_base_name+'.png')
                 im.save(save_path)
+                wandb.log({f"result" : wandb.Image(im)})
         
         # recon log step by step
         # for i in range(9):
@@ -549,7 +550,7 @@ class VQ_Diffusion():
             im = Image.fromarray(content[b])
             im.save(save_path)
 
-        masked_index = model_out['masked_index'].to('cpu') # [masked_num]
+        masked_index = model_out['masked_index'].to('cpu') # [masked_num] ex [1, 3, 10, ...]
         recon_token = model_out['recon_token'].squeeze().to('cpu') # 3, 256, 256
 
         recon_token = recon_token.permute(1, 2, 0).numpy().astype(np.uint8)
@@ -566,6 +567,8 @@ class VQ_Diffusion():
             draw.rectangle((y*8, x*8, y*8+8, x*8+8), outline = 'black', fill = 'black')
         masked_recon_path = os.path.join(save_root, 'masked_recon.png')
         im.save(masked_recon_path)
+
+        return model_out
 
 
     def generate_sample_with_replacement(self, text, truncation_rate, save_root, batch_size, infer_speed=False, guidance_scale=1.0, prior_rule=0, prior_weight=0, learnable_cf=True):
@@ -628,11 +631,91 @@ class VQ_Diffusion():
 
         return model_out
 
+    def real_mask_recon_path(self, path, text, truncation_rate, guidance_scale=5.0): 
+        """
+        data_i = {'image': b, c, h, w, 'text': b, ~}
+        """
+        self.model.guidance_scale = guidance_scale
+        self.model.learnable_cf = self.model.transformer.learnable_cf = True
 
+        with torch.no_grad():
+            model_out = self.model.real_mask_return(
+                batch=data_i,
+                filter_ratio=0,
+                content_ratio=1,
+                return_att_weight=False,
+                truncation_rate=truncation_rate,
+            ) # {'t', 'changed', 'recon_token'}
+
+        return model_out
 if __name__ == '__main__':
     VQ_Diffusion_model = VQ_Diffusion(config='configs/coco_tune.yaml', path='OUTPUT/pretrained_model/coco_learnable.pth')
-    wandb.init(project='FID_50test', name = 'schedule_7_coco')
-    VQ_Diffusion_model.inference_generate_sample_for_fid(truncation_rate=0.86, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=7)
+    data_root = "st1/dataset/coco_vq"
+    data = CocoDataset(data_root=data_root, phase='val')
+    batch_size = 4
+    data_loader = torch.utils.data.DataLoader(dataset=data, batch_size=batch_size, shuffle = False)
+
+    # VQ_Diffusion_model.model.guidance_scale = 5.0
+    # VQ_Diffusion_model.model.learnable_cf = VQ_Diffusion_model.model.transformer.learnable_cf = True
+    # cf_cond_emb = VQ_Diffusion_model.model.transformer.empty_text_embed.unsqueeze(0).repeat(batch_size, 1, 1)
+    # def cf_predict_start(log_x_t, cond_emb, t):
+    #     log_x_recon = VQ_Diffusion_model.model.transformer.predict_start(log_x_t, cond_emb, t)[:, :-1]
+    #     if abs(VQ_Diffusion_model.model.guidance_scale - 1) < 1e-3:
+    #         return torch.cat((log_x_recon, VQ_Diffusion_model.model.transformer.zero_vector), dim=1)
+    #     cf_log_x_recon = VQ_Diffusion_model.model.transformer.predict_start(log_x_t, cf_cond_emb.type_as(cond_emb), t)[:, :-1]
+    
+    #     log_new_x_recon = cf_log_x_recon + VQ_Diffusion_model.model.guidance_scale * (log_x_recon - cf_log_x_recon)
+    #     log_new_x_recon -= torch.logsumexp(log_new_x_recon, dim=1, keepdim=True)
+    #     log_new_x_recon = log_new_x_recon.clamp(-70, 0)
+    #     log_pred = torch.cat((log_new_x_recon, VQ_Diffusion_model.model.transformer.zero_vector), dim=1)
+    #     return log_pred
+    # sample_type = "top"+str(0.86)+'r'
+    # VQ_Diffusion_model.model.transformer.cf_predict_start = VQ_Diffusion_model.model.predict_start_with_truncation(cf_predict_start, sample_type.split(',')[0])
+    # VQ_Diffusion_model.model.truncation_forward = True
+
+
+
+    wandb.init(project='Noise_recon_test')
+    for bb, data_i in enumerate(data_loader):
+        # data_i {"image", "text"}
+        with torch.no_grad():
+            vq_out = VQ_Diffusion_model.real_mask_recon(
+                data_i = data_i,
+                truncation_rate = 0.86,
+                guidance_scale = 5.0
+            ) # {'t': b , 'changed': (b, 1024), 'recon_token': (b, 1024)} in cuda
+        # text drop 추가 예정
+        time = vq_out['t'] # b
+        content_token = vq_out['recon_token'] # b, 1024
+        gt_image_token = vq_out['gt'].cuda()
+        changed = vq_out['changed'].cpu()
+
+        gt_image = VQ_Diffusion_model.model.content_codec.decode(gt_image_token)
+        gt_image = gt_image.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8)
+        content = VQ_Diffusion_model.model.content_codec.decode(content_token)
+        content = content.permute(0, 2, 3, 1).to('cpu').numpy().astype(np.uint8)
+        
+        for b in range(content.shape[0]):
+            cnt = b
+            save_base_name = '{}'.format(str(cnt).zfill(6))
+            im = Image.fromarray(content[b])
+            gt_im = Image.fromarray(gt_image[b])
+            mask_index = (changed[b] == 1).nonzero().squeeze()
+            masked_im = gt_im.copy()
+            draw = ImageDraw.Draw(masked_im)
+            for idx in mask_index:
+                x, y = divmod(int(idx), 32)
+                draw.rectangle((y*8, x*8, y*8+8, x*8+8), outline = 'black', fill = 'black')
+
+            # save_path = os.path.join(save_root_, save_base_name+'.png')
+            all_image = Image.new('RGB', (3*im.size[0], im.size[1]), (250, 250, 250))
+            all_image.paste(gt_im, (0, 0))
+            all_image.paste(masked_im, (im.size[0], 0))
+            all_image.paste(im, (2*im.size[0], 0))
+            wandb.log({"image" : wandb.Image(all_image, caption = f"Time{time[b].item()}_{data_i['text'][b]}")})
+    # wandb.init()
+    # wandb.init(project='FID_50test', name = 'schedule_7_coco')
+    # VQ_Diffusion_model.inference_generate_sample_for_fid(truncation_rate=0.86, batch_size=4, guidance_scale=5.0, prior_rule=2, prior_weight=1, schedule=7)
     # VQ_Diffusion_model.recon_test('/content/drive/MyDrive/VQ/Improved_VQ-Diffusion/blur_test')
     # VQ_Diffusion_model = VQ_Diffusion(config='configs/ithq.yaml', path='OUTPUT/pretrained_model/ithq_learnable.pth')
 
